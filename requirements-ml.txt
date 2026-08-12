@@ -1,0 +1,6 @@
+# Training-only dependencies. Keep these separate from the lightweight API image.
+# The explicit CPU wheel avoids Windows DLL failures from GPU-enabled builds.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy>=1.26,<2
+torch==2.5.1+cpu
+scikit-learn==1.5.2

@@ -1,0 +1,17 @@
+.venv-ml/
+.venv-behavior/
+ml/artifacts/
+ml/.artifact-work/
+__pycache__/
+*.py[cod]
+
+# Local datasets and generated feature exports
+DAiSEE/
+AllLabels.csv
+*_blendshapes.csv
+
+# Local runtime credentials and endpoints
+src/config.local.js
+.env
+.env.*
+!.env.example

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open Emotional Learner Model</title>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18",
+      "react-dom/client": "https://esm.sh/react-dom@18/client",
+      "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
+    }
+  }
+  </script>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <link rel="stylesheet" href="./src/styles.css?v=csv-export-2" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="./src/config.js?v=local-config-1"></script>
+  <script src="./src/config.local.js?v=local-config-1"></script>
+  <script type="module" src="./src/app.js?v=csv-export-2"></script>
+</body>
+</html>

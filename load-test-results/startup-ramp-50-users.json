@@ -1,0 +1,56 @@
+{
+  "run_id": "20260804-171316",
+  "configuration": {
+    "users": 50,
+    "duration": 0.0,
+    "interval": 10,
+    "ramp_up": 30.0,
+    "hf_url": "[configured locally]",
+    "timeout": 20,
+    "supabase_mode": "read",
+    "cohort_id": "",
+    "run_id": "20260804-171316",
+    "feature_count": 364
+  },
+  "wall_seconds": 31.453,
+  "operations": {
+    "hf_startup_predict": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 1.59,
+      "latency_ms": {
+        "median": 994.31,
+        "p95": 1088.69,
+        "p99": 1117.43,
+        "max": 1121.06
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    },
+    "supabase_cohort_read": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 1.59,
+      "latency_ms": {
+        "median": 199.13,
+        "p95": 431.03,
+        "p99": 522.64,
+        "max": 571.62
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    }
+  },
+  "assessment": {
+    "passed": true,
+    "failures": []
+  }
+}

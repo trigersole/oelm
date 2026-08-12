@@ -1,0 +1,126 @@
+{
+  "run_id": "20260805-50students-5min-01",
+  "configuration": {
+    "users": 50,
+    "duration": 300.0,
+    "interval": 10.0,
+    "ramp_up": 0.0,
+    "hf_url": "[configured locally]",
+    "timeout": 20,
+    "supabase_mode": "write",
+    "cohort_id": "oelm_50_5min_20260805_01",
+    "run_id": "20260805-50students-5min-01",
+    "feature_count": 364
+  },
+  "wall_seconds": 306.938,
+  "operations": {
+    "hf_startup_predict": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 0.163,
+      "latency_ms": {
+        "median": 1341.63,
+        "p95": 1720.95,
+        "p99": 1756.44,
+        "max": 1780.75
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    },
+    "hf_steady_predict": {
+      "requests": 1500,
+      "successes": 1500,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 4.887,
+      "latency_ms": {
+        "median": 1179.15,
+        "p95": 1403.76,
+        "p99": 1494.97,
+        "max": 1602.36
+      },
+      "statuses": {
+        "200": 1500
+      },
+      "example_errors": []
+    },
+    "supabase_cohort_read": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 0.163,
+      "latency_ms": {
+        "median": 1715.39,
+        "p95": 2155.34,
+        "p99": 2235.96,
+        "max": 2269.14
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    },
+    "supabase_log_insert": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 0.163,
+      "latency_ms": {
+        "median": 924.48,
+        "p95": 1476.36,
+        "p99": 1546.72,
+        "max": 1573.46
+      },
+      "statuses": {
+        "201": 50
+      },
+      "example_errors": []
+    },
+    "supabase_prediction_insert": {
+      "requests": 1500,
+      "successes": 1500,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 4.887,
+      "latency_ms": {
+        "median": 252.13,
+        "p95": 432.78,
+        "p99": 582.09,
+        "max": 966.59
+      },
+      "statuses": {
+        "201": 1500
+      },
+      "example_errors": []
+    },
+    "supabase_session_insert": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 0.163,
+      "latency_ms": {
+        "median": 904.02,
+        "p95": 1382.7,
+        "p99": 1516.27,
+        "max": 1595.4
+      },
+      "statuses": {
+        "201": 50
+      },
+      "example_errors": []
+    }
+  },
+  "assessment": {
+    "passed": false,
+    "failures": [
+      "Supabase p95 1038ms > 1000ms"
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "run_id": "20260804-171233",
+  "configuration": {
+    "users": 50,
+    "duration": 0.0,
+    "interval": 10,
+    "ramp_up": 0.0,
+    "hf_url": "[configured locally]",
+    "timeout": 20,
+    "supabase_mode": "read",
+    "cohort_id": "",
+    "run_id": "20260804-171233",
+    "feature_count": 364
+  },
+  "wall_seconds": 3.968,
+  "operations": {
+    "hf_startup_predict": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 12.601,
+      "latency_ms": {
+        "median": 1224.15,
+        "p95": 1437.72,
+        "p99": 1536.87,
+        "max": 1608.79
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    },
+    "supabase_cohort_read": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 12.601,
+      "latency_ms": {
+        "median": 2405.54,
+        "p95": 2688.38,
+        "p99": 2806.77,
+        "max": 2866.51
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    }
+  },
+  "assessment": {
+    "passed": false,
+    "failures": [
+      "Supabase p95 2688ms > 1000ms"
+    ]
+  }
+}

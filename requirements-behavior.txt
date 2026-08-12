@@ -1,0 +1,4 @@
+# Video-only feature extraction. Keep separate from the deployed API image.
+numpy>=1.26,<2
+mediapipe==0.10.33
+opencv-contrib-python>=4.11,<4.14
