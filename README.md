@@ -91,6 +91,7 @@ The frontend currently expects these tables to exist:
 - `sessions`
 - `emotion_predictions`
 - `manual_overrides`
+- `pause_reflection_aoi`
 - `login_credentials`
 - `logs`
 
@@ -99,6 +100,8 @@ Before production use, confirm the database schema matches the fields written by
 For clearer naming, run `docs/supabase-schema-alignment.sql` first in the Supabase SQL Editor. It adds columns that match the dashboard language: `cohort_id`, `activity_type`, `task_description`, `access_code`, `created_at`, `participant_id`, and `vlearn_url`.
 
 For manual edit history, run `docs/supabase-manual-overrides-history.sql`. It keeps every manual override row, marks older rows as `status = false`, and keeps only the latest matching edit as `status = true`. The instructor dashboard reads only `status = true` manual overrides.
+
+For per-reflection screen-attention metrics, run `docs/supabase-pause-reflection-aoi.sql`. It stores `% AOI = time looking inside the screen AOI / total Pause and Reflect time` for each participant and reflection, and makes those values available to the instructor dashboard.
 
 After the app is verified against those aligned columns, run `docs/supabase-final-cleanup.sql` to remove older redundant columns such as `session_group`, `group_id`, `password`, `type`, `reflection_mode`, `session_group_type`, `session_description`, `user_id`, `date`, `time_stamp`, and `learning_url`. The cleanup also clears `logs.event_data` so the logs table keeps the event name in `event_name` and stores searchable values in normal columns.
 

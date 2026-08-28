@@ -41,6 +41,7 @@ const SHOW_DEBUG_PANEL = true;
 const ADMIN_USER_ID = window.OELM_CONFIG?.ADMIN_USER_ID || '';
 const ADMIN_PASSWORD = window.OELM_CONFIG?.ADMIN_PASSWORD || '';
 const MANUAL_OVERRIDE_TABLE = 'manual_overrides';
+const PAUSE_REFLECTION_AOI_TABLE = 'pause_reflection_aoi';
 const MANUAL_OVERRIDE_CHANGE_THRESHOLD_PERCENT = 20;
 const LABEL_SPLIT_MIN_BUCKET_MS = 1 * 1000;
 
@@ -438,6 +439,19 @@ function attentionStatusLabel(status) {
   }[status] || 'Collecting gaze samples';
 }
 
+function emptyPauseAOITracker() {
+  return {
+    pauseNumber: null,
+    startedAt: null,
+    startedWallClock: null,
+    lastSampleAt: null,
+    insideMs: 0,
+    validFrames: 0,
+    totalFrames: 0,
+    finalized: true,
+  };
+}
+
 // ===============================================================
 // Inference client - Hugging Face Space / FastAPI
 // ===============================================================
@@ -595,6 +609,33 @@ async function insertPrediction(sessionUuid, userId, prediction, aggFeatures, pa
   await sbRequest('emotion_predictions', 'POST', payload);
 }
 
+async function savePauseReflectionAOI(metric) {
+  if (!metric?.session_id || !metric?.pause_and_reflect_number) return;
+  await sbRequest(
+    PAUSE_REFLECTION_AOI_TABLE,
+    'POST',
+    metric,
+    { on_conflict: 'session_id,pause_and_reflect_number' },
+    { prefer: 'resolution=merge-duplicates' },
+  );
+}
+
+async function savePauseReflectionAOIWithRetry(metric, maxAttempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await savePauseReflectionAOI(metric);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => window.setTimeout(resolve, 400 * (2 ** (attempt - 1))));
+      }
+    }
+  }
+  throw lastError;
+}
+
 // -- Save manual override to Supabase ---------------------------
 // Stores every saved manual edit as a history row. Only the latest edit for the
 // same session/cohort/participant/pause bucket/emotion bucket stays status=true.
@@ -741,10 +782,22 @@ async function fetchAdminSessionOverview() {
     limit: '10000',
   }) || [];
 
+  let aoiRows = [];
+  try {
+    aoiRows = await sbRequest(PAUSE_REFLECTION_AOI_TABLE, 'GET', null, {
+      select: 'session_id,cohort_id,participant_id,pause_and_reflect_number,total_pause_ms,inside_aoi_ms,aoi_percent,valid_gaze_frames,total_gaze_frames,paused_at,resumed_at',
+      order: 'paused_at.desc',
+      limit: '10000',
+    }) || [];
+  } catch (error) {
+    console.warn('[Supabase] Pause/reflection AOI metrics are unavailable:', error);
+  }
+
   const defaultEditMetrics = () => ({
     manual_override_count: 0,
     max_pause_and_reflect_number: 0,
     par_metrics: {},
+    aoi_metrics: {},
     justifications: [],
   });
 
@@ -823,7 +876,7 @@ async function fetchAdminSessionOverview() {
       m.max_pause_and_reflect_number = segmentNumber;
     }
 
-    const bucketKey = segmentNumber <= 4 ? String(segmentNumber) : '4+';
+    const bucketKey = String(segmentNumber);
     if (!m.par_metrics[bucketKey]) {
       m.par_metrics[bucketKey] = { minor: 0, major: 0, words: 0 };
     }
@@ -849,6 +902,35 @@ async function fetchAdminSessionOverview() {
     }
 
     m.manual_override_count += 1;
+  }
+
+  for (const row of aoiRows) {
+    const identityKey = normalizeIdentity(row?.session_id, row?.participant_id);
+    if (!identityKey) continue;
+    if (!metricsBySession[identityKey]) metricsBySession[identityKey] = defaultEditMetrics();
+
+    if (!sessionMetaById[identityKey]) {
+      sessionMetaById[identityKey] = {
+        id: String(row?.session_id || identityKey),
+        label: '',
+        created_at: row.paused_at || null,
+        cohort_id: row.cohort_id || 'unassigned',
+        activity_type: '',
+        participant_id: row.participant_id || '',
+      };
+    }
+
+    const reflectionNumber = Number(row.pause_and_reflect_number);
+    if (!Number.isFinite(reflectionNumber) || reflectionNumber <= 0) continue;
+    const m = metricsBySession[identityKey];
+    m.max_pause_and_reflect_number = Math.max(m.max_pause_and_reflect_number, reflectionNumber);
+    m.aoi_metrics[String(reflectionNumber)] = {
+      percent: Math.max(0, Math.min(100, Number(row.aoi_percent) || 0)),
+      total_pause_ms: Math.max(0, Number(row.total_pause_ms) || 0),
+      inside_aoi_ms: Math.max(0, Number(row.inside_aoi_ms) || 0),
+      valid_gaze_frames: Math.max(0, Number(row.valid_gaze_frames) || 0),
+      total_gaze_frames: Math.max(0, Number(row.total_gaze_frames) || 0),
+    };
   }
 
   const sessionIds = new Set([
@@ -1591,6 +1673,7 @@ function App() {
   const [checkedLabels, setCheckedLabels] = useState({Boredom:false, Engagement:false, Confusion:false, Frustration:false});
   const [overrides,    setOverrides]    = useState({});
   const [manualEditCount, setManualEditCount] = useState(0);
+  const [currentPauseAOIPercent, setCurrentPauseAOIPercent] = useState(null);
 
   const videoRef     = useRef(null);
   const canvasRef    = useRef(null);
@@ -1600,6 +1683,7 @@ function App() {
   const streamRef    = useRef(null);
   const frameBuffer  = useRef([]);
   const gazeBuffer   = useRef([]);
+  const pauseAOIRef  = useRef(emptyPauseAOITracker());
   const currentGazeAOIRef = useRef(null);
   const gazeStatsRef = useRef({
     insideRatio: null,
@@ -1635,6 +1719,22 @@ function App() {
 
   useEffect(() => { userIdRef.current = userId; }, [userId]);
   useEffect(() => { activeCohortRef.current = activeCohort; }, [activeCohort]);
+
+  useEffect(() => {
+    if (!paused) return undefined;
+    let secondFrame = null;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        document.querySelectorAll('.reflection-layout .js-plotly-plot').forEach(plot => {
+          Plotly.Plots?.resize?.(plot);
+        });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [paused]);
 
   const refreshAdminOverview = useCallback(async () => {
     setAdminLoading(true);
@@ -1974,6 +2074,19 @@ function App() {
 
     if (gazeMode) {
       const gaze = estimateGazeAOI(result.faceLandmarks?.[0]);
+      const pauseTracker = pauseAOIRef.current;
+      if (pauseTracker.startedAt !== null && !pauseTracker.finalized) {
+        const rawDeltaMs = Math.max(0, now - (pauseTracker.lastSampleAt ?? pauseTracker.startedAt));
+        // Credit only observed, regularly sampled time inside the AOI. Long gaps
+        // and missing-face samples remain part of total pause time but add no AOI time.
+        const creditedDeltaMs = Math.min(rawDeltaMs, (1000 / CAPTURE_FPS) * 2);
+        if (gaze?.inside_aoi) pauseTracker.insideMs += creditedDeltaMs;
+        pauseTracker.lastSampleAt = now;
+        pauseTracker.totalFrames += 1;
+        if (gaze) pauseTracker.validFrames += 1;
+        const totalPauseMs = Math.max(1, now - pauseTracker.startedAt);
+        setCurrentPauseAOIPercent(Math.min(100, pauseTracker.insideMs / totalPauseMs * 100));
+      }
       gazeBuffer.current.push(gaze);
       currentGazeAOIRef.current = gaze;
       setNoFace(!gaze);
@@ -2080,6 +2193,8 @@ function App() {
     };
     setOverrides({});
     setManualEditCount(0);
+    pauseAOIRef.current = emptyPauseAOITracker();
+    setCurrentPauseAOIPercent(null);
     frameBuffer.current = []; gazeBuffer.current = []; throttleRef.current = 0;
     processingGenerationRef.current += 1;
     activeElapsedBeforePauseRef.current = 0;
@@ -2121,9 +2236,54 @@ function App() {
     openMonitorWindow();
   }, [openMonitorWindow]);
 
+  const beginPauseAOI = useCallback(() => {
+    const now = performance.now();
+    pauseAOIRef.current = {
+      pauseNumber: activeSegmentRef.current,
+      startedAt: now,
+      startedWallClock: new Date().toISOString(),
+      lastSampleAt: now,
+      insideMs: 0,
+      validFrames: 0,
+      totalFrames: 0,
+      finalized: false,
+    };
+    setCurrentPauseAOIPercent(0);
+  }, []);
+
+  const finalizePauseAOI = useCallback((endedBy) => {
+    const tracker = pauseAOIRef.current;
+    if (tracker.startedAt === null || tracker.finalized) return null;
+    tracker.finalized = true;
+    const totalPauseMs = Math.max(0, performance.now() - tracker.startedAt);
+    const insideAOIMs = Math.min(totalPauseMs, Math.max(0, tracker.insideMs));
+    const aoiPercent = totalPauseMs > 0 ? insideAOIMs / totalPauseMs * 100 : 0;
+    setCurrentPauseAOIPercent(aoiPercent);
+
+    const metric = {
+      session_id: sessionRef.current,
+      participant_id: userIdRef.current || null,
+      cohort_id: activeCohortRef.current?.id || null,
+      pause_and_reflect_number: tracker.pauseNumber,
+      paused_at: tracker.startedWallClock,
+      resumed_at: new Date().toISOString(),
+      total_pause_ms: Math.round(totalPauseMs),
+      inside_aoi_ms: Math.round(insideAOIMs),
+      aoi_percent: Number(aoiPercent.toFixed(2)),
+      valid_gaze_frames: tracker.validFrames,
+      total_gaze_frames: tracker.totalFrames,
+      ended_by: endedBy,
+    };
+    savePauseReflectionAOIWithRetry(metric).catch(error => {
+      setLastError('[Supabase] save Pause and Reflect AOI: ' + String(error));
+    });
+    return metric;
+  }, []);
+
   const handlePauseToggle = useCallback(() => {
     if (!running && !paused) return;
     if (paused) {
+      finalizePauseAOI('resumed');
       activeSegmentRef.current += 1;
       activeRunStartedAtRef.current = performance.now();
       segmentStartedAtWallClockRef.current = Date.now();
@@ -2165,6 +2325,7 @@ function App() {
       totalFrames: 0,
       status: 'WAITING',
     };
+    beginPauseAOI();
     pausedRef.current = true; setPaused(true);
     runningRef.current = false;
     setProcessingStatus('Starting dashboard gaze check');
@@ -2172,9 +2333,10 @@ function App() {
     if (rafRef.current) cancelFrameRef.current(rafRef.current);
     rafRef.current = scheduleFrameRef.current(processFrame);
     logEvent(sessionRef.current, activeCohort?.id || null, 'session_paused', {}, userId).catch(() => {});
-  }, [running, paused, processFrame, activeCohort]);
+  }, [running, paused, processFrame, activeCohort, beginPauseAOI, finalizePauseAOI]);
 
   const handleStop = useCallback(() => {
+    if (pausedRef.current) finalizePauseAOI('stopped');
     if (sessionRef.current) {
       logEvent(sessionRef.current, activeCohort?.id || null, 'session_stopped', {}, userId).catch(() => {});
     }
@@ -2202,8 +2364,10 @@ function App() {
       status: 'WAITING',
     };
     gazeBuffer.current = [];
+    pauseAOIRef.current = emptyPauseAOITracker();
+    setCurrentPauseAOIPercent(null);
     closeMonitorWindow();
-  }, [activeCohort, closeMonitorWindow]);
+  }, [activeCohort, closeMonitorWindow, finalizePauseAOI]);
 
   pauseActionRef.current = handlePauseToggle;
   stopActionRef.current = handleStop;
@@ -2300,12 +2464,10 @@ function App() {
   const e = React.createElement;
 
   if (isAdminMode) {
-    const MAX_PAUSE_REFLECT_INDEX = 4;
     const buildPauseReflectBuckets = (maxIndex) => {
-      const safeMax = Math.max(0, Number(maxIndex) || 0);
+      const safeMax = Math.max(0, Math.floor(Number(maxIndex) || 0));
       const buckets = [];
-      for (let i = 1; i <= Math.min(MAX_PAUSE_REFLECT_INDEX, safeMax); i++) buckets.push(String(i));
-      if (safeMax > MAX_PAUSE_REFLECT_INDEX) buckets.push(`${MAX_PAUSE_REFLECT_INDEX}+`);
+      for (let i = 1; i <= safeMax; i++) buckets.push(String(i));
       return buckets;
     };
 
@@ -2327,6 +2489,16 @@ function App() {
       };
     };
 
+    const getAOIMetric = (metrics, bucketKey) => {
+      const row = metrics?.[bucketKey];
+      if (!row) return null;
+      return {
+        percent: Math.max(0, Math.min(100, Number(row.percent) || 0)),
+        total_pause_ms: Math.max(0, Number(row.total_pause_ms) || 0),
+        inside_aoi_ms: Math.max(0, Number(row.inside_aoi_ms) || 0),
+      };
+    };
+
     const renderReflectionMetricHeader = (prefix, bucket, metricKey, metricLabel) => (
       e('th', { key:`${prefix}-${bucket}-${metricKey}` }, `${metricLabel} (Reflection ${bucket})`)
     );
@@ -2344,6 +2516,8 @@ function App() {
         edits: 0,
         max_pause_and_reflect_number: 0,
         par_metrics: {},
+        aoi_inside_ms_sum: 0,
+        aoi_total_ms_sum: 0,
         created_at: g.created_at,
         access_code: g.access_code,
       };
@@ -2364,6 +2538,10 @@ function App() {
         g.par_metrics[key].minor += Number(rowMetrics[key]?.minor) || 0;
         g.par_metrics[key].major += Number(rowMetrics[key]?.major) || 0;
         g.par_metrics[key].words += Number(rowMetrics[key]?.words) || 0;
+      }
+      for (const metric of Object.values(row.aoi_metrics || {})) {
+        g.aoi_inside_ms_sum += Math.max(0, Number(metric?.inside_aoi_ms) || 0);
+        g.aoi_total_ms_sum += Math.max(0, Number(metric?.total_pause_ms) || 0);
       }
     }
     const cohortStats = Object.values(cohortsById).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -2411,6 +2589,7 @@ function App() {
           `Minor Edits Made (Reflection ${bucket})`,
           `Major Edits Made (Reflection ${bucket})`,
           `Word Count (Reflection ${bucket})`,
+          `% AOI (Reflection ${bucket})`,
         ]),
         'Submission Date',
       ];
@@ -2422,7 +2601,8 @@ function App() {
         getUserTextForRow(row),
         ...sessionBuckets.flatMap(bucket => {
           const m = getBucketMetric(row.par_metrics, bucket);
-          return [m.minor, m.major, m.words];
+          const aoi = getAOIMetric(row.aoi_metrics, bucket);
+          return [m.minor, m.major, m.words, aoi ? Number(aoi.percent.toFixed(2)) : ''];
         }),
         row.created_at ? formatSingaporeTime(row.created_at, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '-',
       ]);
@@ -2493,6 +2673,7 @@ function App() {
                   e('th', null, 'Access Code'),
                   e('th', null, 'Created On'),
                   e('th', { style:{ minWidth:'110px', width:'110px', maxWidth:'110px' } }, 'Total Edits Made'),
+                  e('th', null, 'Average % AOI'),
                   e('th', null, 'Total Participants'),
                 )
               ),
@@ -2512,9 +2693,10 @@ function App() {
                     e('td', null, e('span', { style:{fontFamily:'var(--mono)'} }, g.access_code || '-')),
                     e('td', null, g.created_at ? formatSingaporeTime(g.created_at, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '-'),
                     e('td', { style:{ minWidth:'110px', width:'110px', maxWidth:'110px' } }, String(g.edits || 0)),
+                    e('td', null, g.aoi_total_ms_sum ? `${(g.aoi_inside_ms_sum / g.aoi_total_ms_sum * 100).toFixed(1)}%` : '-'),
                     e('td', null, String(g.sessions || 0)),
                   ))
-                  : e('tr', null, e('td', { colSpan:7, style:{color:'var(--muted)'} }, 'No cohorts created yet.'))
+                  : e('tr', null, e('td', { colSpan:8, style:{color:'var(--muted)'} }, 'No cohorts created yet.'))
               )
             )
           )
@@ -2545,6 +2727,7 @@ function App() {
                     renderReflectionMetricHeader('s', bucket, 'minor', 'Minor Edits Made'),
                     renderReflectionMetricHeader('s', bucket, 'major', 'Major Edits Made'),
                     renderReflectionMetricHeader('s', bucket, 'words', 'Word Count'),
+                    renderReflectionMetricHeader('s', bucket, 'aoi', '% AOI'),
                   ]),
                   e('th', null, 'Submission Date'),
                 )
@@ -2568,15 +2751,20 @@ function App() {
                     ),
                     ...sessionBuckets.flatMap(bucket => {
                       const m = getBucketMetric(row.par_metrics, bucket);
+                      const aoi = getAOIMetric(row.aoi_metrics, bucket);
                       return [
                         e('td', { key:`s-${row.id}-${bucket}-minor` }, String(m.minor)),
                         e('td', { key:`s-${row.id}-${bucket}-major` }, String(m.major)),
                         e('td', { key:`s-${row.id}-${bucket}-words` }, String(m.words)),
+                        e('td', {
+                          key:`s-${row.id}-${bucket}-aoi`,
+                          title:aoi ? `${Math.round(aoi.inside_aoi_ms / 1000)}s inside AOI / ${Math.round(aoi.total_pause_ms / 1000)}s total pause time` : 'No completed AOI measurement',
+                        }, aoi ? `${aoi.percent.toFixed(1)}%` : '-'),
                       ];
                     }),
                     e('td', null, row.created_at ? formatSingaporeTime(row.created_at, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '-'),
                   ))
-                  : e('tr', null, e('td', { colSpan:6 + (sessionBuckets.length * 3), style:{color:'var(--muted)'} }, selectedCohortId ? (adminLoading ? 'Loading participant data...' : 'No submissions found for this cohort.') : 'Select a cohort to view participant reflections.'))
+                  : e('tr', null, e('td', { colSpan:6 + (sessionBuckets.length * 4), style:{color:'var(--muted)'} }, selectedCohortId ? (adminLoading ? 'Loading participant data...' : 'No submissions found for this cohort.') : 'Select a cohort to view participant reflections.'))
               )
             )
           )
@@ -2653,10 +2841,16 @@ function App() {
     e('div', { className:'header' },
       e('div', { className:`status-dot ${running ? 'active' : ''}` }),
       e('h1', null, 'Open ', e('span',null,'Emotional'), ' Learner'),
-      e('span', { className:'privacy-badge' }, e('span', { className:'lock-icon', 'aria-hidden':'true' }), 'All camera processing is local'),
       userId ? e('div', { style:{ marginLeft:'8px', color:'var(--subtext)', fontFamily:'var(--mono)'} }, `Participant ${userId}`) : null,
       activeCohort?.id ? e('span', { className:'pill', style:{ marginLeft:'0.4rem' } }, `${activeCohort.id} - ${ACTIVITY_TYPE_LABELS[activeCohort.activity_type || activeCohort.type] || activeCohort.activity_type || activeCohort.type}`) : null,
-      e('button', { className:'btn-ghost', style:{ marginLeft:'auto' }, onClick:handleLeaveToGateway }, 'Exit Session'),
+      e('div', { className:'header-actions' },
+        e('button', {
+          className:`btn-ghost ${monitorMode ? 'lit' : ''}`,
+          onClick:handleOpenSmallWindow,
+          title:'Open the compact, always-visible OELM floating view',
+        }, monitorMode ? 'Floating View Active' : 'Open Floating View'),
+        e('button', { className:'btn-ghost', onClick:handleLeaveToGateway }, 'Exit Session'),
+      ),
     ),
 
     configWarn && e('div', { className:'banner warn' }, 'Warning: ' + configWarn),
@@ -2674,36 +2868,37 @@ function App() {
       e('div', { className:'controls-row' },
         e('div', null,
           !running && !paused
-            ? e('button', { className:'btn-primary', onClick:handleStart, disabled:!modelReady,
+            ? e('button', { className:'btn-primary session-action-btn', onClick:handleStart, disabled:!modelReady,
                 title: modelReady ? 'Start capture' : 'Loading MediaPipe model...' },
                 modelReady ? 'Start' : 'Loading...')
-            : e('button', { className:'btn-danger', onClick:handleStop }, 'Stop')
+            : e('button', { className:'btn-danger session-action-btn', onClick:handleStop }, 'Stop')
         ),
         e('div', { className:'btn-group' },
           e('button', {
-            className:'btn-ghost',
-            onClick:handleOpenSmallWindow,
-            title:'Open an always-visible monitoring window for camera processing',
-          }, monitorMode ? 'Monitor Open' : 'Open Monitor'),
-          e('button', {
-            className:`btn-ghost ${paused ? 'lit' : ''}`,
+            className:`btn-ghost reflect-action-btn ${paused ? 'lit' : ''}`,
             onClick:handlePauseToggle, disabled:!running && !paused,
           }, paused ? 'Resume' : 'Pause and Reflect')
         ),
       ),
     ),
 
-    e('div', { className:'main-grid', style:{gridTemplateColumns: paused ? '1fr 3fr' : '3fr 1fr'} },
+    e('div', {
+      className:`main-grid ${paused ? 'reflection-layout' : 'content-layout'}`,
+      style:{ gridTemplateColumns:'minmax(0, 1fr)', width:'100%', minWidth:0 },
+    },
 
-      e('div', { style:{display:'flex',flexDirection:'column',gap:'1rem'} },
+      !paused ? e('div', { style:{display:'flex',flexDirection:'column',gap:'1rem'} },
         e('div', { className:'panel' },
           e('div', { className:'panel-header' },
             e('span',null,'Content'),
             contentUrl && e('span',{style:{color:'var(--muted)',fontSize:'0.63rem',maxWidth:220,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},contentUrl),
           ),
-          contentUrl
+          contentUrl && (running || paused)
             ? e('div',{className:'iframe-wrap'}, e('iframe',{src:contentUrl,allow:'autoplay; encrypted-media',allowFullScreen:true,sandbox:'allow-scripts allow-same-origin allow-forms allow-popups'}))
-            : e('div',{className:'iframe-placeholder'}, e('div',{className:'icon'},'Content'), e('p',null,'Paste a URL above to load content')),
+            : e('div',{className:'iframe-placeholder'},
+                e('div',{className:'icon'},'Content'),
+                e('p',null, contentUrl ? 'Press Start to load content' : 'Paste a URL above, then press Start to load content')
+              ),
         ),
 
         SHOW_WEBCAM_PANEL ? e('div', { className:'panel' },
@@ -2744,12 +2939,18 @@ function App() {
             e('div',{className:'stat'}, e('div',{className:'val'},lastPredTime??'-'),e('div',{className:'key'},'Last pred')),
           ),
         ) : null,
-      ),
+      ) : null,
 
-      e('div', { style:{display:'flex',flexDirection:'column',gap:'1rem'} },
+      e('div', { className:'secondary-column', style:{display:'flex',flexDirection:'column',gap:'1rem',width:'100%',minWidth:0} },
 
         paused ? e('div', { className:'panel' },
-          e('div',{className:'panel-header'}, panelTitle('Overall Emotional Intensity Distribution', 'chart-title-icon chart-title-icon-wide')),
+          e('div',{className:'panel-header'},
+            panelTitle('Overall Emotional Intensity Distribution', 'chart-title-icon chart-title-icon-wide'),
+            e('div', { className:'edit-counter', title:'Time looking inside the screen AOI divided by total current Pause and Reflect time' },
+              e('span', null, `Pause & Reflect #${activeSegmentRef.current} AOI`),
+              e('span', { className:'count' }, currentPauseAOIPercent === null ? '-' : `${currentPauseAOIPercent.toFixed(1)}%`),
+            ),
+          ),
           e('div',{className:'timeline-section'}, e(OverallSplitChart,{history})),
         ) : null,
 
