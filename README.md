@@ -1,92 +1,144 @@
-# Open Emotional Learner Model
+---
+title: OELM Binary XGBoost API
+emoji: 🧠
+colorFrom: blue
+colorTo: orange
+sdk: docker
+app_port: 7860
+pinned: false
+---
 
-Open Emotional Learner Model, or OELM, is a browser-based learning engagement tool. The frontend captures local face blendshape data with MediaPipe, sends aggregated features to a Hugging Face-hosted model API, and stores sessions, predictions, login credentials, cohorts, logs, and manual reflection edits in Supabase.
+# Open Emotional Learner Model — binary XGBoost
 
-## Project Structure
+This branch is the two-level OELM variant. It combines the four original DAiSEE
+intensity levels into a binary target for each affective state:
 
-```text
-.
-|-- index.html                 # Small browser entry point
-|-- src/
-|   |-- app.js                 # React app, UI flow, charts, capture, Supabase calls
-|   |-- config.js              # Frontend URLs and public Supabase anon key
-|   |-- styles.css             # App styling
-|   `-- data/
-|       `-- featureOrder.js    # Ordered model feature list sent to the API
-|-- docs/
-|   |-- supabase-schema-alignment.sql
-|   |-- supabase-manual-overrides-history.sql
-|   `-- supabase-final-cleanup.sql
-|-- app.py                     # FastAPI inference server
-|-- Models/                    # Local model files
-|-- feature_order.pkl          # Backend feature order used by the API
-|-- requirements.txt           # Python dependencies
-|-- Dockerfile                 # Docker/Hugging Face Space container setup
-|-- Procfile                   # Process command for deployment platforms
-`-- railway.toml               # Railway deployment settings
+| Binary class | Original DAiSEE levels |
+|---|---|
+| `0 — Low` | Very Low + Low |
+| `1 — High` | High + Very High |
+
+The browser processes camera frames locally with MediaPipe, aggregates 52 face
+blendshapes into 364 statistics every 10 seconds, and sends only those statistics
+to the FastAPI model service. Four directly trained binary XGBoost heads predict
+Boredom, Engagement, Confusion, and Frustration.
+
+## Selected checkpoint
+
+The deployed models use training seed `1729`. This seed was selected because it
+had the stronger mean validation macro-F1 of the two audited runs. The held-out
+test split was not used for checkpoint selection.
+
+The per-label thresholds were also selected on validation macro-F1:
+
+| Label | High threshold |
+|---|---:|
+| Boredom | 0.47 |
+| Engagement | 0.46 |
+| Confusion | 0.49 |
+| Frustration | 0.49 |
+
+The exact thresholds, feature order, model files, and preserved metrics are in
+[`binary_models/`](binary_models/).
+
+## Run and verify the model locally
+
+From this branch or worktree in PowerShell:
+
+```powershell
+python -m venv .venv-api
+.\.venv-api\Scripts\python -m pip install --upgrade pip
+.\.venv-api\Scripts\python -m pip install -r requirements.txt
+.\.venv-api\Scripts\python -m uvicorn app:app --host 127.0.0.1 --port 7860
 ```
 
-## Frontend
+In a second terminal:
 
-The browser app is loaded from `index.html`, but the actual work is separated into files under `src/`.
+```powershell
+Invoke-RestMethod http://127.0.0.1:7860/health
+.\.venv-api\Scripts\python tools\smoke_test_binary_api.py
+.\.venv-api\Scripts\python -m unittest tests.test_binary_api
+```
 
-- `src/config.js` contains safe committed defaults; local values go in the ignored `src/config.local.js` file.
-- `src/app.js` contains the React application logic.
-- `src/styles.css` contains all visual styling.
-- `src/data/featureOrder.js` contains the exact feature order used when calling the model API.
+The response for every affective target must contain only `label: 0` / `Low` or
+`label: 1` / `High`, with two probabilities that sum to one.
 
-Because the app uses JavaScript modules, run it through a local web server instead of opening `index.html` directly.
+### Test the complete browser application
 
-```bash
+Copy the safe configuration template to the ignored local file:
+
+```powershell
+Copy-Item src\config.example.js src\config.local.js
+```
+
+Set these two values in `src/config.local.js` while the local API is running:
+
+```javascript
+HF_SPACE_URL: 'http://127.0.0.1:7860',
+API_BASE_URL: 'http://127.0.0.1:7860',
+```
+
+Add your local Supabase and login values to the same ignored file, then start the
+frontend:
+
+```powershell
 python -m http.server 8080
 ```
 
-Then open:
+Open `http://localhost:8080`. Predictions, timelines, split charts, manual
+overrides, saved probabilities, and simulated predictions all use only Low/High.
+
+## API contract
+
+Endpoints:
+
+- `GET /` — service links
+- `GET /health` — model readiness and feature count
+- `GET /model-info` — mapping, seed, and validation thresholds
+- `POST /predict` — binary inference from `agg_features`
+- `GET /docs` — interactive OpenAPI documentation
+
+Example response fragment:
+
+```json
+{
+  "Boredom": {
+    "label": 0,
+    "level": "Low",
+    "probabilities": {"0": 0.72, "1": 0.28},
+    "threshold": 0.47
+  }
+}
+```
+
+## Hugging Face deployment
+
+This repository is ready for a Hugging Face **Docker Space**. The README metadata
+sets `sdk: docker` and `app_port: 7860`; the Dockerfile packages only the API and
+the binary deployment resources.
+
+See [`docs/hugging-face-binary-deployment.md`](docs/hugging-face-binary-deployment.md)
+for the complete deployment and verification workflow.
+
+## Project layout
 
 ```text
-http://localhost:8080
+app.py                         Binary FastAPI inference service
+binary_models/                 Four UBJ models, thresholds, feature order, metrics
+Dockerfile                     Hugging Face Docker Space image
+requirements.txt               Lightweight API-only Python dependencies
+index.html                     Browser entry point
+src/app.js                     React interface and MediaPipe processing
+src/config.example.js          Safe configuration template
+docs/                          Supabase, deployment, and testing instructions
+ml/train_xgboost_binary.py     Reproducible direct-binary training pipeline
+tests/test_binary_api.py       Local model/API contract tests
+tools/smoke_test_binary_api.py Running-server smoke test
 ```
 
-## Configuration
+## Supabase configuration
 
-Copy `src/config.example.js` to `src/config.local.js`, then add the local runtime values there:
-
-```text
-src/config.local.js
-```
-
-Important values:
-
-- `HF_SPACE_URL`: public Hugging Face Space URL for the model API.
-- `API_BASE_URL`: API base URL used by the frontend. Usually the same as `HF_SPACE_URL`.
-- `SUPABASE_URL`: Supabase project URL.
-- `SUPABASE_KEY`: Supabase anon/public key used by the browser.
-- `ADMIN_USER_ID`: local instructor login identifier.
-- `ADMIN_PASSWORD`: local instructor login password.
-
-`src/config.local.js` is ignored by Git and must never be committed. Any value delivered to a browser is still visible to that browser, so protect Supabase data with strict Row Level Security. For a production instructor login, replace the client-side ID/password comparison with server-side authentication.
-
-## Model API
-
-The backend is a FastAPI service in `app.py`.
-
-Main endpoints:
-
-- `GET /health`: checks that the server is running and models are loaded.
-- `POST /predict`: accepts aggregated blendshape features and returns predictions for Boredom, Engagement, Confusion, and Frustration.
-
-Run locally:
-
-```bash
-pip install -r requirements.txt
-uvicorn app:app --reload --host 0.0.0.0 --port 7860
-```
-
-The frontend expects the API to expose `/predict` and allow browser requests through CORS.
-
-## Supabase Tables Used By The Frontend
-
-The frontend currently expects these tables to exist:
+The frontend uses the following tables:
 
 - `sessions`
 - `emotion_predictions`
@@ -95,23 +147,10 @@ The frontend currently expects these tables to exist:
 - `login_credentials`
 - `logs`
 
-Before production use, confirm the database schema matches the fields written by `src/app.js`.
+Apply the SQL files in `docs/` as described by their headers. Keep all Supabase,
+Hugging Face, ID, and password values in the ignored `src/config.local.js` or in
+the hosting platform's secret/variable settings. Never commit them.
 
-For clearer naming, run `docs/supabase-schema-alignment.sql` first in the Supabase SQL Editor. It adds columns that match the dashboard language: `cohort_id`, `activity_type`, `task_description`, `access_code`, `created_at`, `participant_id`, and `vlearn_url`.
-
-For manual edit history, run `docs/supabase-manual-overrides-history.sql`. It keeps every manual override row, marks older rows as `status = false`, and keeps only the latest matching edit as `status = true`. The instructor dashboard reads only `status = true` manual overrides.
-
-For per-reflection screen-attention metrics, run `docs/supabase-pause-reflection-aoi.sql`. It stores `% AOI = time looking inside the screen AOI / total Pause and Reflect time` for each participant and reflection, and makes those values available to the instructor dashboard.
-
-After the app is verified against those aligned columns, run `docs/supabase-final-cleanup.sql` to remove older redundant columns such as `session_group`, `group_id`, `password`, `type`, `reflection_mode`, `session_group_type`, `session_description`, `user_id`, `date`, `time_stamp`, and `learning_url`. The cleanup also clears `logs.event_data` so the logs table keeps the event name in `event_name` and stores searchable values in normal columns.
-
-## Development Notes
-
-- Camera processing stays local in the browser; the app sends aggregated blendshape features to the model API, not webcam video.
-- Keep `src/data/featureOrder.js` aligned with `feature_order.pkl` used by the backend.
-- If the Hugging Face model URL changes, update `src/config.js` only.
-- If Supabase policies or table names change, update the Supabase helper calls in `src/app.js`.
-
-## Load Testing
-
-Use `tools/oelm_load_test.py` to simulate the startup burst and 10-second prediction cadence of 50 simultaneous students. See `docs/load-testing.md` for safe Hugging Face-only, Supabase read-only, and guarded end-to-end write-test commands.
+Any value delivered to browser JavaScript is visible to the browser. Supabase
+Row Level Security must enforce data access, and production instructor login
+should use server-side authentication rather than a client-side password check.

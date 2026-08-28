@@ -1,0 +1,22 @@
+{
+  "model_version": "xgb-binary-v1",
+  "model_type": "direct binary XGBoost",
+  "training_seed": 1729,
+  "source_level_mapping": {
+    "Low": ["Very Low", "Low"],
+    "High": ["High", "Very High"]
+  },
+  "decision_thresholds": {
+    "Boredom": 0.4699999988079071,
+    "Engagement": 0.46000000834465027,
+    "Confusion": 0.49000000953674316,
+    "Frustration": 0.49000000953674316
+  },
+  "best_iterations": {
+    "Boredom": 317,
+    "Engagement": 44,
+    "Confusion": 118,
+    "Frustration": 77
+  },
+  "selection": "Seed selected by mean validation macro-F1; the test split was not used for checkpoint selection."
+}

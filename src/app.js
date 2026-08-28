@@ -18,7 +18,7 @@ const SUPABASE_KEY = window.OELM_CONFIG?.SUPABASE_KEY || '';
 const CAPTURE_FPS    = 5;
 const WINDOW_SECONDS = 10;
 const WINDOW_FRAMES  = CAPTURE_FPS * WINDOW_SECONDS;  // 50
-const MODEL_VERSION  = 'xgb-v1';
+const MODEL_VERSION  = 'xgb-binary-v1';
 const SINGAPORE_TZ   = 'Asia/Singapore';
 const GAZE_AOI_CONFIG = {
   name: 'Whole screen AOI',
@@ -147,8 +147,9 @@ const BLENDSHAPE_NAMES = [
 const LABEL_COLS   = ['Boredom','Engagement','Confusion','Frustration'];
 const LABEL_COLORS = { Boredom:'#6B7280', Engagement:'#10B981', Confusion:'#F59E0B', Frustration:'#EF4444' };
 const LABEL_EMOJIS = { Boredom:'', Engagement:'', Confusion:'', Frustration:'' };
-const LEVEL_LABELS = ['Very Low','Low','High','Very High'];
-const LEVEL_COLORS = ['#334155', '#38BDF8', '#22C55E', '#F97316'];
+const LEVEL_LABELS = ['Low','High'];
+const LEVEL_COLORS = ['#38BDF8', '#F97316'];
+const LEVEL_COUNT = LEVEL_LABELS.length;
 
 const PLOTLY_STATIC_CONFIG = {
   displayModeBar: false,
@@ -670,7 +671,7 @@ async function saveManualOverride(
     pause_and_reflect_number: pauseAndReflectNumber ?? null,
     bucket_label:        bucketLabel,
     label_col:           labelCol,
-    level_percentages:   levelPercentages,  // array [veryLow%, low%, high%, veryHigh%]
+    level_percentages:   levelPercentages,  // array [low%, high%]
     original_predictions: originalPredictions,
     is_major_change:     isMajorChange,
     is_minor_change:     isMinorChange,
@@ -1090,8 +1091,10 @@ function TimelineChart({ history, visibleLabels }) {
       },
       yaxis: {
         fixedrange: true,
-        range:[-0.5,3.5], tickmode:'array', tickvals:[0,1,2,3],
-        ticktext:['Very Low','Low','High','Very High'],
+        range:[-0.5,LEVEL_COUNT - 0.5],
+        tickmode:'array',
+        tickvals:LEVEL_LABELS.map((_, index) => index),
+        ticktext:LEVEL_LABELS,
         showgrid:true, gridcolor:'rgba(80,80,100,0.2)', color:'#aaa',
         automargin:true,
         showline:true,
@@ -1126,10 +1129,10 @@ function TimelineChart({ history, visibleLabels }) {
 function computeOverallLevelPercentages(history) {
   const result = {};
   for (const label of LABEL_COLS) {
-    const counts = [0, 0, 0, 0];
+    const counts = Array(LEVEL_COUNT).fill(0);
     for (const row of history) {
       const level = row[label];
-      if (level !== undefined && level !== null && level >= 0 && level < 4) counts[level] += 1;
+      if (level !== undefined && level !== null && level >= 0 && level < LEVEL_COUNT) counts[level] += 1;
     }
     const total = counts.reduce((s, x) => s + x, 0) || 0;
     result[label] = counts.map(c => total ? +(c / total * 100).toFixed(0) : 0);
@@ -1181,7 +1184,7 @@ function bucketLevelPercentages(history, label, bucketMinutes = 5, editableSegme
   if (!rawRows.length) {
     return {
       labels: [],
-      percentagesPerLevel: [[], [], [], []],
+      percentagesPerLevel: Array.from({ length: LEVEL_COUNT }, () => []),
       bucketKeys: [],
       editableMask: [],
       bucketDurationMs: [],
@@ -1224,9 +1227,12 @@ function bucketLevelPercentages(history, label, bucketMinutes = 5, editableSegme
     const localBucketCount = dedupedBoundaries.length - 1;
     if (localBucketCount < 1) return;
 
-    const localCounts = Array.from({ length: localBucketCount }, () => [0, 0, 0, 0]);
+    const localCounts = Array.from(
+      { length: localBucketCount },
+      () => Array(LEVEL_COUNT).fill(0),
+    );
     for (const r of segmentRows) {
-      if (r.level < 0 || r.level >= 4) continue;
+      if (r.level < 0 || r.level >= LEVEL_COUNT) continue;
       let idx = localBucketCount - 1;
       for (let i = 0; i < localBucketCount; i++) {
         if (r.ts >= dedupedBoundaries[i] && r.ts < dedupedBoundaries[i + 1]) {
@@ -1251,10 +1257,10 @@ function bucketLevelPercentages(history, label, bucketMinutes = 5, editableSegme
     }
   });
 
-  const percentagesPerLevel = [[], [], [], []];
+  const percentagesPerLevel = Array.from({ length: LEVEL_COUNT }, () => []);
   for (const c of counts) {
     const total = c.reduce((s, x) => s + x, 0) || 0;
-    for (let i = 0; i < 4; i++) percentagesPerLevel[i].push(total ? +(c[i] / total * 100).toFixed(0) : 0);
+    for (let i = 0; i < LEVEL_COUNT; i++) percentagesPerLevel[i].push(total ? +(c[i] / total * 100).toFixed(0) : 0);
   }
   return { labels, percentagesPerLevel, bucketKeys, editableMask, bucketDurationMs, visibleMask };
 }
@@ -1263,9 +1269,9 @@ function bucketLevelPercentages(history, label, bucketMinutes = 5, editableSegme
 // BAR EDIT PANEL - shown on bar click
 // ===============================================================
 function BarEditPanel({ label, bucketLabel, bucketKey, initialValues, currentValues, onSave, onClose, sessionId, cohortId, pauseAndReflectNumber, requireTextJustification, userId }) {
-  // initialValues: array of 4 numbers summing to 100 (original AI prediction)
+  // initialValues: one percentage per binary level, summing to 100.
   const getStartValues = () => {
-    if (Array.isArray(currentValues) && currentValues.length === 4) return [...currentValues];
+    if (Array.isArray(currentValues) && currentValues.length === LEVEL_COUNT) return [...currentValues];
     return [...initialValues];
   };
   const [vals, setVals] = useState(getStartValues);
@@ -1299,18 +1305,19 @@ function BarEditPanel({ label, bucketLabel, bucketKey, initialValues, currentVal
     const remainder = 100 - clamped;
     if (otherSum === 0) {
       // Spread evenly
-      const share = Math.round(remainder / 3);
+      const share = Math.round(remainder / Math.max(1, LEVEL_COUNT - 1));
       let leftover = remainder;
-      for (let i = 0; i < 4; i++) {
+      const otherIdxs = LEVEL_LABELS.map((_, i) => i).filter(i => i !== idx);
+      for (let i = 0; i < LEVEL_COUNT; i++) {
         if (i === idx) continue;
         if (leftover <= 0) { next[i] = 0; continue; }
-        const v = i === [0,1,2,3].filter(x=>x!==idx).slice(-1)[0] ? leftover : share;
+        const v = i === otherIdxs[otherIdxs.length - 1] ? leftover : share;
         next[i] = Math.min(v, leftover);
         leftover -= next[i];
       }
     } else {
       let assigned = 0;
-      const otherIdxs = [0,1,2,3].filter(i => i !== idx);
+      const otherIdxs = LEVEL_LABELS.map((_, i) => i).filter(i => i !== idx);
       for (let j = 0; j < otherIdxs.length; j++) {
         const i = otherIdxs[j];
         if (j === otherIdxs.length - 1) {
@@ -1466,7 +1473,7 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
     base.bucketKeys.forEach((bucketKey, bi) => {
       const key = `${label}:${bucketKey}`;
       if (overrides[key]) {
-        for (let li = 0; li < 4; li++) ppl[li][bi] = overrides[key][li];
+        for (let li = 0; li < LEVEL_COUNT; li++) ppl[li][bi] = overrides[key][li];
       }
     });
     return { ...base, percentagesPerLevel: ppl };
@@ -1524,7 +1531,7 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
       text: labels.map((lbl, bi) => (visibleMask?.[bi] ? `${percentagesPerLevel[li][bi]}%` : '')),
       textposition: 'auto',
       textfont: {
-        color: (li === 1 || li === 3) ? '#0b1220' : '#f8fafc',
+        color: li === 1 ? '#0b1220' : '#f8fafc',
         size: 10,
       },
       hovertemplate: `<b>${label} - ${lvl}</b><br>%{customdata}: %{y}%<extra></extra>`,
@@ -2413,8 +2420,13 @@ function App() {
   const injectDummy = useCallback(() => {
     const dummy = {};
     for (const lbl of LABEL_COLS) {
-      const label = Math.floor(Math.random() * 4);
-      dummy[lbl] = { label, probabilities: Array.from({length:4}, () => +Math.random().toFixed(4)) };
+      const label = Math.floor(Math.random() * LEVEL_COUNT);
+      const high = Math.random();
+      dummy[lbl] = {
+        label,
+        level: LEVEL_LABELS[label],
+        probabilities: { 0:+(1 - high).toFixed(4), 1:+high.toFixed(4) },
+      };
     }
     setHistory(h => {
       const lastActiveElapsedMs = h.length
@@ -2448,7 +2460,7 @@ function App() {
         for (const row of rows) {
           const key = `${row.label_col}:${row.bucket_label}`;
           if (next[key]) continue;
-          if (Array.isArray(row.level_percentages) && row.level_percentages.length === 4) {
+          if (Array.isArray(row.level_percentages) && row.level_percentages.length === LEVEL_COUNT) {
             next[key] = row.level_percentages.map(v => Number(v) || 0);
           }
         }

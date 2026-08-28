@@ -1,5 +1,6 @@
 .venv-ml/
 .venv-behavior/
+.venv-api/
 ml/artifacts/
 ml/.artifact-work/
 __pycache__/
