@@ -61,8 +61,9 @@ def main() -> None:
     health = request_json(f"{base_url}/health")
     if health.get("status") != "ok":
         raise AssertionError(f"Unhealthy service: {health}")
-    if health.get("levels") != ["Low", "High"]:
-        raise AssertionError(f"Unexpected levels: {health.get('levels')}")
+    binary_health = health.get("binary", health)
+    if binary_health.get("levels") != ["Low", "High"]:
+        raise AssertionError(f"Unexpected binary levels: {binary_health.get('levels')}")
     if health.get("feature_count") != 364:
         raise AssertionError(f"Unexpected feature count: {health.get('feature_count')}")
 
@@ -72,7 +73,7 @@ def main() -> None:
         feature_order = json.load(handle)
     features = {name: 0.0 for name in feature_order}
     prediction = request_json(
-        f"{base_url}/predict", {"agg_features": features}
+        f"{base_url}/predict-binary", {"agg_features": features}
     )
     validate_prediction(prediction)
 
