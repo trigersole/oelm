@@ -14,6 +14,7 @@ AllLabels.csv
 
 # Local runtime credentials and endpoints
 src/config.local.js
+dist/src/config.local.js
 .env
 .env.*
 !.env.example

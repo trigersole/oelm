@@ -3,6 +3,5 @@ window.OELM_CONFIG = {
   API_BASE_URL: 'https://YOUR_SPACE.hf.space',
   SUPABASE_URL: 'https://YOUR_PROJECT.supabase.co',
   SUPABASE_KEY: 'YOUR_SUPABASE_ANON_KEY',
-  ADMIN_USER_ID: 'YOUR_LOCAL_ADMIN_ID',
-  ADMIN_PASSWORD: 'YOUR_LOCAL_ADMIN_PASSWORD',
+  ADMIN_API_URL: 'https://YOUR_PROJECT.supabase.co/functions/v1/oelm-admin',
 };

@@ -14,6 +14,7 @@ const API_BASE_URL = window.OELM_CONFIG?.API_BASE_URL || HF_SPACE_URL;
 
 const SUPABASE_URL = window.OELM_CONFIG?.SUPABASE_URL || '';
 const SUPABASE_KEY = window.OELM_CONFIG?.SUPABASE_KEY || '';
+const ADMIN_API_URL = window.OELM_CONFIG?.ADMIN_API_URL || (SUPABASE_URL ? `${SUPABASE_URL}/functions/v1/oelm-admin` : '');
 
 const CAPTURE_FPS    = 5;
 const WINDOW_SECONDS = 10;
@@ -38,8 +39,7 @@ const GAZE_AOI_CONFIG = {
 };
 const SHOW_WEBCAM_PANEL = false;
 const SHOW_DEBUG_PANEL = false;
-const ADMIN_USER_ID = window.OELM_CONFIG?.ADMIN_USER_ID || '';
-const ADMIN_PASSWORD = window.OELM_CONFIG?.ADMIN_PASSWORD || '';
+let adminSessionToken = '';
 const MANUAL_OVERRIDE_TABLE = 'manual_overrides';
 const PAUSE_REFLECTION_AOI_TABLE = 'pause_reflection_aoi';
 const MANUAL_OVERRIDE_CHANGE_THRESHOLD_PERCENT = 20;
@@ -557,6 +557,30 @@ async function sbRequest(table, method, body, params, options = {}) {
   return res.json();
 }
 
+async function validateCohortAccessCode(accessCode) {
+  const rows = await sbRequest('rpc/validate_cohort_access_code', 'POST', {
+    p_access_code: accessCode,
+  });
+  const row = Array.isArray(rows) ? rows[0] : rows;
+  return row?.cohort_id ? normalizeCohortRow(row) : null;
+}
+
+async function adminRequest(action, payload = {}, token = adminSessionToken) {
+  if (!ADMIN_API_URL || !SUPABASE_KEY) throw new Error('Administrator API is not configured.');
+  const res = await fetch(ADMIN_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_KEY,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const response = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(response?.error || `Administrator API ${res.status}`);
+  return response;
+}
+
 function normalizeCohortRow(row) {
   return {
     id: row.cohort_id,
@@ -731,23 +755,13 @@ async function getManualOverrides(sessionUuid, cohortId) {
 }
 
 async function fetchCohorts() {
-  const rows = await sbRequest('login_credentials', 'GET', null, {
-    select: 'cohort_id,access_code,created_at,activity_type,task_description,active',
-    order: 'created_at.desc',
-    limit: '500',
-  }) || [];
+  const response = await adminRequest('list_cohorts');
+  const rows = response?.cohorts || [];
   return rows.map(normalizeCohortRow);
 }
 
 async function createCohortCredential(group) {
-  return sbRequest('login_credentials', 'POST', {
-    cohort_id: group.id,
-    access_code: group.access_code,
-    created_at: group.created_at,
-    activity_type: group.activity_type,
-    task_description: group.description,
-    active: true,
-  });
+  return adminRequest('create_cohort', { cohort: group });
 }
 
 async function getManualOverrideCount(sessionUuid, cohortId, userId) {
@@ -765,34 +779,11 @@ async function getManualOverrideCount(sessionUuid, cohortId, userId) {
 }
 
 async function fetchAdminSessionOverview() {
-  const sessions = await sbRequest('sessions', 'GET', null, {
-    select: 'id,session_id,label,created_at,cohort_id,activity_type,participant_id',
-    order: 'created_at.desc',
-    limit: '500',
-  }) || [];
-
-  const predictionRows = await sbRequest('emotion_predictions', 'GET', null, {
-    select: 'session_id,participant_id,cohort_id,activity_type,pause_and_reflect_number,predicted_at',
-    order: 'predicted_at.desc',
-    limit: '20000',
-  }) || [];
-
-  const overrideRows = await sbRequest(MANUAL_OVERRIDE_TABLE, 'GET', null, {
-    select: 'session_id,cohort_id,participant_id,pause_and_reflect_number,bucket_label,label_col,is_minor_change,is_major_change,words_edited,justification,overridden_at,status',
-    order: 'overridden_at.desc',
-    limit: '10000',
-  }) || [];
-
-  let aoiRows = [];
-  try {
-    aoiRows = await sbRequest(PAUSE_REFLECTION_AOI_TABLE, 'GET', null, {
-      select: 'session_id,cohort_id,participant_id,pause_and_reflect_number,total_pause_ms,inside_aoi_ms,aoi_percent,valid_gaze_frames,total_gaze_frames,paused_at,resumed_at',
-      order: 'paused_at.desc',
-      limit: '10000',
-    }) || [];
-  } catch (error) {
-    console.warn('[Supabase] Pause/reflection AOI metrics are unavailable:', error);
-  }
+  const response = await adminRequest('overview');
+  const sessions = response?.sessions || [];
+  const predictionRows = response?.predictions || [];
+  const overrideRows = response?.overrides || [];
+  const aoiRows = response?.aoi || [];
 
   const defaultEditMetrics = () => ({
     manual_override_count: 0,
@@ -1770,10 +1761,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    refreshSessionGroups();
-  }, [refreshSessionGroups]);
-
-  useEffect(() => {
     if (isAdminMode) {
       refreshAdminOverview();
       refreshSessionGroups();
@@ -1880,17 +1867,36 @@ function App() {
       setAuthError('Access code is required.');
       return;
     }
-    if (ADMIN_USER_ID && ADMIN_PASSWORD && uid === ADMIN_USER_ID && enteredAccessCode === ADMIN_PASSWORD) {
-      setAuthError('');
-      setAuthReady(false);
-      setIsAdminMode(true);
-      setActiveCohort(null);
-      setSessionId(null);
-      sessionRef.current = null;
-      await Promise.all([refreshAdminOverview(), refreshSessionGroups()]);
+    if (ADMIN_API_URL) {
+      try {
+        const adminLogin = await adminRequest('login', {
+          admin_id: uid,
+          password: enteredAccessCode,
+        }, '');
+        if (adminLogin?.token) {
+          adminSessionToken = adminLogin.token;
+          setAuthError('');
+          setAuthReady(false);
+          setIsAdminMode(true);
+          setActiveCohort(null);
+          setSessionId(null);
+          sessionRef.current = null;
+          await Promise.all([refreshAdminOverview(), refreshSessionGroups()]);
+          return;
+        }
+      } catch (error) {
+        if (!/invalid administrator credentials/i.test(String(error))) {
+          console.warn('[Admin] Login check unavailable:', error);
+        }
+      }
+    }
+    let group = null;
+    try {
+      group = await validateCohortAccessCode(enteredAccessCode);
+    } catch (error) {
+      setAuthError('Could not validate access code: ' + String(error));
       return;
     }
-    const group = cohortIds.find(g => (g.access_code || '').trim() === enteredAccessCode);
     if (!group) {
       setAuthError('Invalid access code. Access denied.');
       return;
@@ -1908,7 +1914,7 @@ function App() {
     setIsAdminMode(false);
     setAuthError('');
     setAuthReady(true);
-  }, [userId, cohortAccessCodeInput, cohortIds, refreshAdminOverview, refreshSessionGroups]);
+  }, [userId, cohortAccessCodeInput, refreshAdminOverview, refreshSessionGroups]);
 
   const restoreMainProcessingSurface = useCallback(() => {
     processingWindowRef.current = window;
@@ -2404,6 +2410,7 @@ function App() {
     handleStop();
     setAuthReady(false);
     setIsAdminMode(false);
+    adminSessionToken = '';
     setSelectedAdminCohortId(null);
     setUserId('');
     setCohortAccessCodeInput('');
