@@ -11,7 +11,6 @@ import { FEATURE_ORDER } from './data/featureOrder.js';
 // Set this to your Hugging Face Docker Space public URL after deploying:
 const HF_SPACE_URL = window.OELM_CONFIG?.HF_SPACE_URL || '';
 const API_BASE_URL = window.OELM_CONFIG?.API_BASE_URL || HF_SPACE_URL;
-const PUBLIC_DEMO_MODE = window.OELM_CONFIG?.PUBLIC_DEMO_MODE === true;
 
 const SUPABASE_URL = window.OELM_CONFIG?.SUPABASE_URL || '';
 const SUPABASE_KEY = window.OELM_CONFIG?.SUPABASE_KEY || '';
@@ -1783,8 +1782,8 @@ function App() {
 
   useEffect(() => {
     const missing = [];
-    if (!PUBLIC_DEMO_MODE && !SUPABASE_URL) missing.push('SUPABASE_URL');
-    if (!PUBLIC_DEMO_MODE && !SUPABASE_KEY) missing.push('SUPABASE_KEY');
+    if (!SUPABASE_URL)     missing.push('SUPABASE_URL');
+    if (!SUPABASE_KEY)     missing.push('SUPABASE_KEY');
     if (!API_BASE_URL)     missing.push('HF_SPACE_URL');
     if (missing.length) setConfigWarn(`Not configured: ${missing.join(', ')} - edit the CONFIG block`);
   }, []);
@@ -1875,22 +1874,6 @@ function App() {
     }
     if (!/^\d+$/.test(uid)) {
       setAuthError('Participant ID must contain numbers only.');
-      return;
-    }
-    if (PUBLIC_DEMO_MODE) {
-      const demoSessionId = globalThis.crypto?.randomUUID?.() || `demo-${Date.now()}`;
-      const demoCohort = {
-        id: 'public-demo',
-        activity_type: ACTIVITY_TYPES.WITHOUT_EDIT,
-        type: ACTIVITY_TYPES.WITHOUT_EDIT,
-        description: 'Public binary model demonstration',
-      };
-      setSessionId(demoSessionId);
-      sessionRef.current = demoSessionId;
-      setActiveCohort(demoCohort);
-      setIsAdminMode(false);
-      setAuthError('');
-      setAuthReady(true);
       return;
     }
     if (!enteredAccessCode) {
@@ -2834,10 +2817,8 @@ function App() {
   if (!authReady) {
     return e('div', { className:'gateway-wrap login-gateway-wrap' },
       e('div', { className:'name-card', style:{ width:'min(520px, 92%)' } },
-        e('div', { className:'gateway-title' }, PUBLIC_DEMO_MODE ? 'OELM Binary Demo' : 'Participant Login'),
-        e('div', { className:'gateway-sub' }, PUBLIC_DEMO_MODE
-          ? 'Enter a numeric participant label to start. Camera frames stay on your device; only aggregated facial features are sent for Low/High prediction, and this public demo does not save session data.'
-          : 'Enter your Participant ID and Access Code to login.'),
+        e('div', { className:'gateway-title' }, 'Participant Login'),
+        e('div', { className:'gateway-sub' }, 'Enter your Participant ID and Access Code to login.'),
         e('label', { className:'field-label' }, 'Participant ID'),
         e('input', {
           className:'url-input',
@@ -2848,24 +2829,22 @@ function App() {
           value:userId,
           onChange:ev=>setUserId((ev.target.value || '').replace(/\D+/g, '')),
         }),
-        !PUBLIC_DEMO_MODE ? e(React.Fragment, null,
-          e('label', { className:'field-label' }, 'Access Code'),
-          e('input', {
-            className:'url-input',
-            type:'password',
-            placeholder:'Enter your access code',
-            value:cohortAccessCodeInput,
-            onChange:ev=>setCohortAccessCodeInput(ev.target.value),
-          })
-        ) : null,
+        e('label', { className:'field-label' }, 'Access Code'),
+        e('input', {
+          className:'url-input',
+          type:'password',
+          placeholder:'Enter your access code',
+          value:cohortAccessCodeInput,
+          onChange:ev=>setCohortAccessCodeInput(ev.target.value),
+        }),
         authError ? e('div', { className:'banner error', style:{marginTop:'0.6rem', marginBottom:0} }, authError) : null,
         e('div', { className:'name-row' },
           e('div', { style:{ marginLeft:'auto' } },
             e('button', {
               className:'btn-primary',
               onClick:handleEnterWithAccessCode,
-              disabled:!userId.trim() || (!PUBLIC_DEMO_MODE && !cohortAccessCodeInput.trim()),
-            }, PUBLIC_DEMO_MODE ? 'Start Demo' : 'Login')
+              disabled:!userId.trim() || !cohortAccessCodeInput.trim(),
+            }, 'Login')
           )
         )
       )

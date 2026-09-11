@@ -1,5 +1,4 @@
 window.OELM_CONFIG = {
-  PUBLIC_DEMO_MODE: false,
   HF_SPACE_URL: 'https://YOUR_SPACE.hf.space',
   API_BASE_URL: 'https://YOUR_SPACE.hf.space',
   SUPABASE_URL: 'https://YOUR_PROJECT.supabase.co',

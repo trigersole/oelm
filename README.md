@@ -138,11 +138,6 @@ tools/smoke_test_binary_api.py Running-server smoke test
 
 ## Supabase configuration
 
-The public Sites deployment runs in a safe demo mode and does not receive or
-store Supabase credentials or participant records. See
-[`docs/supabase-public-hardening.md`](docs/supabase-public-hardening.md) before
-enabling research-data collection on an internet-facing deployment.
-
 The frontend uses the following tables:
 
 - `sessions`

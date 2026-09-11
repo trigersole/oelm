@@ -1,7 +1,3 @@
-// Safe public-demo configuration. Local research configuration can override
-// these values from the ignored src/config.local.js file.
-window.OELM_CONFIG = {
-  PUBLIC_DEMO_MODE: true,
-  HF_SPACE_URL: 'https://trylio-oelm-xgb-init.hf.space',
-  API_BASE_URL: 'https://trylio-oelm-xgb-init.hf.space',
-};
+// Safe defaults committed to Git. Local and deployment-specific values belong
+// in src/config.local.js, which is intentionally ignored by Git.
+window.OELM_CONFIG = window.OELM_CONFIG || {};
