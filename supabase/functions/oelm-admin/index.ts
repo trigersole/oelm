@@ -24,6 +24,19 @@ function allowedOrigin(request: Request) {
   return allowed.includes(origin) ? origin : "";
 }
 
+function getPublishableKey() {
+  const configured = Deno.env.get("OELM_SUPABASE_PUBLISHABLE_KEY") || "";
+  if (configured) return configured;
+  const legacy = Deno.env.get("SUPABASE_ANON_KEY") || "";
+  if (legacy) return legacy;
+  try {
+    const keys = JSON.parse(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS") || "{}");
+    return String(keys?.default || Object.values(keys || {})[0] || "");
+  } catch {
+    return "";
+  }
+}
+
 function base64url(bytes: Uint8Array) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -81,16 +94,31 @@ Deno.serve(async request => {
   });
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405, origin);
 
+  const input = await request.json().catch(() => ({}));
+  const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+  if (input?.action === "public_config") {
+    const publishableKey = getPublishableKey();
+    const hfSpaceUrl = Deno.env.get("OELM_HF_SPACE_URL") || "";
+    if (!supabaseUrl || !publishableKey || !hfSpaceUrl) {
+      return json({ error: "Public application configuration is incomplete." }, 503, origin);
+    }
+    return json({
+      SUPABASE_URL: supabaseUrl,
+      SUPABASE_KEY: publishableKey,
+      HF_SPACE_URL: hfSpaceUrl,
+      API_BASE_URL: hfSpaceUrl,
+      ADMIN_API_URL: `${supabaseUrl.replace(/\/$/, "")}/functions/v1/oelm-admin`,
+    }, 200, origin);
+  }
+
   const adminId = Deno.env.get("OELM_ADMIN_USER_ID") || "";
   const adminPassword = Deno.env.get("OELM_ADMIN_PASSWORD") || "";
   const sessionSecret = Deno.env.get("OELM_ADMIN_SESSION_SECRET") || "";
-  const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
   const supabaseSecret = Deno.env.get("OELM_SUPABASE_SECRET_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
   if (!adminId || !adminPassword || !sessionSecret || !supabaseUrl || !supabaseSecret) {
     return json({ error: "Administrator service is not configured." }, 503, origin);
   }
 
-  const input = await request.json().catch(() => ({}));
   if (input?.action === "login") {
     const validId = await safeEqual(String(input?.admin_id || ""), adminId);
     const validPassword = await safeEqual(String(input?.password || ""), adminPassword);

@@ -3,6 +3,30 @@ import { createRoot } from 'react-dom/client';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 import { FEATURE_ORDER } from './data/featureOrder.js';
 
+async function loadPublicRuntimeConfig() {
+  const config = window.OELM_CONFIG || {};
+  if (config.SUPABASE_URL && config.SUPABASE_KEY && (config.API_BASE_URL || config.HF_SPACE_URL)) return;
+  if (!config.PUBLIC_CONFIG_URL) return;
+
+  try {
+    const response = await fetch(config.PUBLIC_CONFIG_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'public_config' }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error || `Public configuration ${response.status}`);
+    for (const key of ['SUPABASE_URL', 'SUPABASE_KEY', 'HF_SPACE_URL', 'API_BASE_URL', 'ADMIN_API_URL']) {
+      if (typeof payload?.[key] === 'string' && payload[key]) config[key] = payload[key];
+    }
+    window.OELM_CONFIG = config;
+  } catch (error) {
+    console.error('[Config] Could not load public runtime configuration:', error);
+  }
+}
+
+await loadPublicRuntimeConfig();
+
 
 // ===============================================================
 // CONFIG

@@ -22,6 +22,8 @@ Function Secrets; do not put them in `src/config.local.js` or GitHub:
 - `OELM_ADMIN_SESSION_SECRET` (a random value of at least 32 bytes)
 - `OELM_SUPABASE_SECRET_KEY` (the server-side secret key)
 - `OELM_ALLOWED_ORIGINS` (comma-separated exact origins)
+- `OELM_SUPABASE_PUBLISHABLE_KEY` (the browser-safe publishable key)
+- `OELM_HF_SPACE_URL` (the public binary-model Space URL)
 
 For local and production testing, an example allowed-origins value is:
 
@@ -35,21 +37,17 @@ with the server-only key.
 
 ## 3. Prepare frontend deployment files without committing values
 
-Set these environment variables in the terminal used for packaging:
-
-- `OELM_SUPABASE_URL`
-- `OELM_SUPABASE_PUBLISHABLE_KEY`
-- `OELM_HF_SPACE_URL`
-
-Then run:
+After redeploying `oelm-admin` with its `public_config` action, run:
 
 ```powershell
 .\scripts\prepare-public-dist.ps1
 ```
 
-This creates ignored `dist/src/config.local.js`. It is included in the hosted
-website but cannot be added to Git accidentally. A publishable key is visible
-to website visitors by design; never use a secret or service-role key here.
+The committed frontend contains only the public Edge Function URL. At startup,
+the browser requests its Supabase URL, publishable key, and Hugging Face URL
+from `public_config`. Administrator credentials and the Supabase secret key are
+never returned. A publishable key remains visible to website visitors by
+design; never return a secret or service-role key from `public_config`.
 
 ## 4. Required checks before publication
 
