@@ -1490,22 +1490,24 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
 
     const tickvals = xPositions;
     const ticktext = labels.map((l, i) => visibleMask?.[i] ? l : '');
-    const lockAnnotations = labels
-      .map((lbl, bi) => {
-        if (!visibleMask?.[bi]) return null;
-        if (editableMask?.[bi]) return null;
-        return {
-          x: xPositions[bi],
-          y: 100,
-          xref: 'x',
-          yref: 'y',
-          text: '\uD83D\uDD12',
-          showarrow: false,
-          yshift: 10,
-          font: { size: 16 },
-        };
-      })
-      .filter(Boolean);
+    const lockAnnotations = canEdit
+      ? labels
+        .map((lbl, bi) => {
+          if (!visibleMask?.[bi]) return null;
+          if (editableMask?.[bi]) return null;
+          return {
+            x: xPositions[bi],
+            y: 100,
+            xref: 'x',
+            yref: 'y',
+            text: '\uD83D\uDD12',
+            showarrow: false,
+            yshift: 10,
+            font: { size: 16 },
+          };
+        })
+        .filter(Boolean)
+      : [];
 
     const traces = LEVEL_LABELS.map((lvl, li) => ({
       x: xPositions,
@@ -1596,7 +1598,7 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
             e('div', { style:{fontSize:'0.72rem', color:'#9ba3c4', marginTop:'0.15rem', padding:'0 0.1rem'} }, '5 Min Windows'),
             canEdit
               ? e('div', { className:'chart-click-hint' }, 'Click a bar to contest AI predictions you disagree with')
-              : e('div', { className:'chart-click-hint' }, 'Editing disabled for your assigned cohort'),
+              : null,
             e('div', {
               ref: el => chartRefs.current[idx] = el,
               style:{
@@ -2860,7 +2862,7 @@ function App() {
     e('div', { className:'control-bar' },
       e('input', {
         className:'url-input', type:'text',
-        placeholder:'Paste a lecture / video URL...',
+        placeholder:'Paste a URL here to load content',
         value:contentUrl, onChange:ev=>setContentUrl(ev.target.value),
         onBlur: ev => { if (ev.target.value) logEvent(sessionRef.current, activeCohort?.id || null, 'vlearn_link_added', { vlearn_url: ev.target.value }, userId).catch(() => {}); },
         disabled:running || paused,
@@ -2946,10 +2948,6 @@ function App() {
         paused ? e('div', { className:'panel' },
           e('div',{className:'panel-header'},
             panelTitle('Overall Emotional Intensity Distribution', 'chart-title-icon chart-title-icon-wide'),
-            e('div', { className:'edit-counter', title:'Time looking inside the screen AOI divided by total current Pause and Reflect time' },
-              e('span', null, `Pause & Reflect #${activeSegmentRef.current} AOI`),
-              e('span', { className:'count' }, currentPauseAOIPercent === null ? '-' : `${currentPauseAOIPercent.toFixed(1)}%`),
-            ),
           ),
           e('div',{className:'timeline-section'}, e(OverallSplitChart,{history})),
         ) : null,
@@ -2982,7 +2980,7 @@ function App() {
               e('input', { type:'checkbox', checked:checkedLabels[lbl], onChange:ev=>setCheckedLabels(prev=>({...prev,[lbl]:ev.target.checked})), style:{cursor:'pointer'} }),
               lbl
             )),
-            e('div', { style:{ fontSize:'0.75rem', color:'#9ba3c4', fontStyle:'italic', marginLeft:'auto' } }, 'OK Tick to View the Emotional Intensity Timeline')
+            e('div', { style:{ fontSize:'0.75rem', color:'#9ba3c4', fontStyle:'italic', marginLeft:'auto' } }, 'Tick to View the Emotional Intensity Timeline')
           ),
           e('div',{className:'timeline-section'}, e(TimelineChart,{history, visibleLabels:checkedLabels})),
           e('hr',{className:'div'}),
