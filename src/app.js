@@ -480,6 +480,21 @@ function emptyPauseAOITracker() {
 // ===============================================================
 // Inference client - Hugging Face Space / FastAPI
 // ===============================================================
+function isBinaryPrediction(prediction) {
+  if (!prediction || typeof prediction !== 'object') return false;
+  return LABEL_COLS.every(label => {
+    const result = prediction[label];
+    if (!result || !Number.isInteger(result.label) || result.label < 0 || result.label >= LEVEL_COUNT) return false;
+    if (result.level !== LEVEL_LABELS[result.label]) return false;
+    const probabilities = result.probabilities;
+    if (!probabilities || Object.keys(probabilities).sort().join(',') !== '0,1') return false;
+    const low = Number(probabilities[0]);
+    const high = Number(probabilities[1]);
+    return Number.isFinite(low) && Number.isFinite(high) && low >= 0 && low <= 1 && high >= 0 && high <= 1
+      && Math.abs(low + high - 1) <= 0.0001;
+  });
+}
+
 async function classifyWindow(aggregatedFeatures) {
   if (!API_BASE_URL) {
     console.warn('[API] API_BASE_URL is not set.');
@@ -488,61 +503,24 @@ async function classifyWindow(aggregatedFeatures) {
   const orderedFeatures = {};
   for (const k of FEATURE_ORDER) orderedFeatures[k] = aggregatedFeatures[k] ?? 0;
 
-  // Support both FastAPI (/predict) and HF Gradio Space APIs.
-  const attempts = [
-    {
-      url: `${API_BASE_URL}/predict-binary`,
-      body: { agg_features: orderedFeatures },
-    },
-    {
-      url: `${API_BASE_URL}/api/predict`,
-      body: { agg_features: orderedFeatures },
-    },
-    {
-      url: `${API_BASE_URL}/api/predict`,
-      body: { data: [orderedFeatures] },
-    },
-  ];
-
   try {
-    for (const attempt of attempts) {
-      const res = await fetch(attempt.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(attempt.body),
-      });
-
-      if (!res.ok) {
-        const text = await res.text();
-        console.warn('[API] HTTP error:', attempt.url, res.status, text.slice(0, 200));
-        continue;
-      }
-
-      const payload = await res.json();
-
-      // FastAPI returns prediction object directly.
-      if (payload && payload.Boredom && payload.Engagement && payload.Confusion && payload.Frustration) {
-        return payload;
-      }
-
-      // Some Gradio variants return { data: [predictionObject] }.
-      if (
-        payload &&
-        Array.isArray(payload.data) &&
-        payload.data[0] &&
-        payload.data[0].Boredom &&
-        payload.data[0].Engagement &&
-        payload.data[0].Confusion &&
-        payload.data[0].Frustration
-      ) {
-        return payload.data[0];
-      }
-
-      // If response shape differs, keep trying fallbacks.
-      console.warn('[API] Unexpected response shape from', attempt.url, payload);
+    const url = `${API_BASE_URL.replace(/\/$/, '')}/predict-binary`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agg_features: orderedFeatures }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn('[API] HTTP error:', url, res.status, text.slice(0, 200));
+      return null;
     }
-
-    return null;
+    const payload = await res.json();
+    if (!isBinaryPrediction(payload)) {
+      console.warn('[API] Rejected non-binary prediction from', url);
+      return null;
+    }
+    return payload;
   } catch (err) {
     console.error('[API] classify error:', err);
     return null;
@@ -633,7 +611,9 @@ async function createSession(label = '', cohortId = '', userId = '', activityTyp
 }
 
 async function insertPrediction(sessionUuid, userId, prediction, aggFeatures, pauseAndReflectNumber, cohortId = '', activityType = '') {
-  if (!sessionUuid) return;
+  if (!sessionUuid) throw new Error('No authenticated session is available for the prediction save.');
+  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase is not configured for the prediction save.');
+  if (!isBinaryPrediction(prediction)) throw new Error('A non-binary prediction cannot be saved.');
   const labelsFlat = {}, probsFlat = {};
   let maxConf = 0;
   for (const lbl of LABEL_COLS) {
@@ -1168,6 +1148,8 @@ function OverallSplitChart({ history }) {
       marker: { color: LEVEL_COLORS[li] },
       text: LABEL_COLS.map(lbl => { const pct = levelPercentages[lbl][li]; return pct > 0 ? `${pct}%` : ''; }),
       textposition: 'inside',
+      insidetextanchor: 'middle',
+      textfont: { color: '#0b1220', size: 11 },
       hovertemplate: `<b>%{x}</b><br>${lvl}: %{y}%<extra></extra>`,
     }));
     Plotly.react(divRef.current, traces, {
@@ -1545,17 +1527,19 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
           return 1;
         }),
       },
-      text: labels.map((lbl, bi) => (visibleMask?.[bi] ? `${percentagesPerLevel[li][bi]}%` : '')),
-      textposition: 'auto',
-      textfont: {
-        color: li === 1 ? '#0b1220' : '#f8fafc',
-        size: 10,
-      },
+      text: labels.map((lbl, bi) => {
+        const pct = percentagesPerLevel[li][bi];
+        // Avoid clipped or rotated labels on short segments and narrow windows.
+        return visibleMask?.[bi] && pct >= 25 && normalizedWidths[bi] >= 0.3 ? `${pct}%` : '';
+      }),
+      textposition: 'inside',
+      insidetextanchor: 'middle',
+      textfont: { color: '#0b1220', size: 11 },
       hovertemplate: `<b>${label} - ${lvl}</b><br>%{customdata}: %{y}%<extra></extra>`,
     }));
 
     Plotly.react(div, traces, {
-      margin:{l:82,r:10,t:30,b:60}, height:220,
+      margin:{l:82,r:10,t:30,b:60}, height:250,
       paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
       barmode:'stack',
       xaxis:{

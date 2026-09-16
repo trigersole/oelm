@@ -20,6 +20,19 @@ class FrontendBinaryContractTests(unittest.TestCase):
     def test_frontend_records_binary_model_version(self) -> None:
         self.assertIn("const MODEL_VERSION  = 'xgb-binary-v1';", self.source)
 
+    def test_only_binary_predictions_reach_supabase(self) -> None:
+        self.assertIn("function isBinaryPrediction(prediction)", self.source)
+        self.assertIn("if (!isBinaryPrediction(prediction)) throw new Error", self.source)
+        self.assertIn("/predict-binary`;", self.source)
+        self.assertNotIn("${API_BASE_URL}/api/predict", self.source)
+        self.assertIn("await sbRequest('emotion_predictions', 'POST', payload)", self.source)
+
+    def test_small_chart_segments_are_left_unlabelled(self) -> None:
+        self.assertNotIn("smallLabelAnnotations", self.source)
+        self.assertIn("pct >= 25 && normalizedWidths[bi] >= 0.3 ? `${pct}%` : ''", self.source)
+        self.assertIn("annotations: lockAnnotations", self.source)
+        self.assertIn("textfont: { color: '#0b1220', size: 11 }", self.source)
+
     def test_binary_level_count_drives_charts_and_overrides(self) -> None:
         required_fragments = [
             "Array(LEVEL_COUNT).fill(0)",
