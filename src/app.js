@@ -1513,6 +1513,22 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
         .filter(Boolean)
       : [];
 
+    const barLabelAnnotations = labels.flatMap((_, bi) => {
+      if (!visibleMask?.[bi] || normalizedWidths[bi] < 0.3) return [];
+      let stackedPercent = 0;
+      return LEVEL_LABELS.flatMap((_, li) => {
+        const pct = percentagesPerLevel[li][bi];
+        const center = stackedPercent + pct / 2;
+        stackedPercent += pct;
+        if (pct < 25) return [];
+        return [{
+          x: xPositions[bi], y: center,
+          xref: 'x', yref: 'y', text: `${pct}%`, showarrow: false,
+          font: { color: '#0b1220', size: 11 },
+        }];
+      });
+    });
+
     const traces = LEVEL_LABELS.map((lvl, li) => ({
       x: xPositions,
       y: labels.map((lbl, bi) => (visibleMask?.[bi] ? percentagesPerLevel[li][bi] : null)),
@@ -1527,14 +1543,8 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
           return 1;
         }),
       },
-      text: labels.map((lbl, bi) => {
-        const pct = percentagesPerLevel[li][bi];
-        // Avoid clipped or rotated labels on short segments and narrow windows.
-        return visibleMask?.[bi] && pct >= 25 && normalizedWidths[bi] >= 0.3 ? `${pct}%` : '';
-      }),
-      textposition: 'inside',
-      insidetextanchor: 'middle',
-      textfont: { color: '#0b1220', size: 11 },
+      text: labels.map(() => ''),
+      textposition: 'none',
       hovertemplate: `<b>${label} - ${lvl}</b><br>%{customdata}: %{y}%<extra></extra>`,
     }));
 
@@ -1555,7 +1565,7 @@ function LabelSplitCharts({ history, sessionId, cohortId, overrides, setOverride
       yaxis:{ fixedrange:true, range:[0,100], ticksuffix:'%', showline:true, linecolor:'#666', linewidth:2, gridcolor:'rgba(80,80,100,0.2)', color:'#aaa', automargin:true, title:{text:'Percentage of Time (%)',font:{size:11,color:'#ccc'},standoff:16} },
       font:{size:11, color:'#ccc'},
       legend:{ itemclick:false, itemdoubleclick:false },
-      annotations: lockAnnotations,
+      annotations: [...lockAnnotations, ...barLabelAnnotations],
       dragmode:false,
     }, PLOTLY_EDIT_CONFIG);
 
