@@ -28,10 +28,12 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertIn("await sbRequest('emotion_predictions', 'POST', payload)", self.source)
 
     def test_small_chart_segments_are_left_unlabelled(self) -> None:
-        self.assertIn("const barLabelAnnotations = labels.flatMap", self.source)
-        self.assertIn("normalizedWidths[bi] < 0.3", self.source)
-        self.assertIn("if (pct < 25) return []", self.source)
-        self.assertIn("annotations: [...lockAnnotations, ...barLabelAnnotations]", self.source)
+        self.assertNotIn("barLabelAnnotations", self.source)
+        self.assertIn("return visibleMask?.[bi] && pct > 0 ? `${pct}%` : ''", self.source)
+        self.assertIn("textangle: 0", self.source)
+        self.assertIn("constraintext: 'inside'", self.source)
+        self.assertIn("uniformtext: { minsize: 10, mode: 'hide' }", self.source)
+        self.assertIn("annotations: lockAnnotations", self.source)
         self.assertNotIn("smallLabelAnnotations", self.source)
         self.assertIn("textfont: { color: '#0b1220', size: 11 }", self.source)
 
