@@ -3,13 +3,66 @@ import { createRoot } from 'react-dom/client';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 import { FEATURE_ORDER } from './data/featureOrder.js';
 
+const API_REQUEST_TIMEOUT_MS = 5_000;
+const API_RETRY_DELAY_MS = 250;
+
+class ApiTimeoutError extends Error {
+  constructor(url) {
+    super(`Request timed out after ${API_REQUEST_TIMEOUT_MS}ms: ${url}`);
+    this.name = 'ApiTimeoutError';
+    this.retryable = true;
+  }
+}
+
+function wait(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new ApiTimeoutError(String(url));
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function isRetryableHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function fetchWithRetry(url, options = {}, maxAttempts = 2) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, options);
+      if (!isRetryableHttpStatus(response.status) || attempt === maxAttempts) return response;
+      lastError = new Error(`HTTP ${response.status}: ${url}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) throw error;
+    }
+    await wait(API_RETRY_DELAY_MS * attempt + Math.floor(Math.random() * 100));
+  }
+  throw lastError;
+}
+
+function createRequestId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
 async function loadPublicRuntimeConfig() {
   const config = window.OELM_CONFIG || {};
   if (config.SUPABASE_URL && config.SUPABASE_KEY && (config.API_BASE_URL || config.HF_SPACE_URL)) return;
   if (!config.PUBLIC_CONFIG_URL) return;
 
   try {
-    const response = await fetch(config.PUBLIC_CONFIG_URL, {
+    const response = await fetchWithRetry(config.PUBLIC_CONFIG_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'public_config' }),
@@ -43,6 +96,8 @@ const ADMIN_API_URL = window.OELM_CONFIG?.ADMIN_API_URL || (SUPABASE_URL ? `${SU
 const CAPTURE_FPS    = 5;
 const WINDOW_SECONDS = 10;
 const WINDOW_FRAMES  = CAPTURE_FPS * WINDOW_SECONDS;  // 50
+const RAW_BLENDSHAPE_BATCH_SECONDS = 30;
+const RAW_BLENDSHAPE_BATCH_FRAMES = CAPTURE_FPS * RAW_BLENDSHAPE_BATCH_SECONDS;
 const MODEL_VERSION  = 'xgb-binary-v1';
 const SINGAPORE_TZ   = 'Asia/Singapore';
 const GAZE_AOI_CONFIG = {
@@ -64,6 +119,7 @@ const GAZE_AOI_CONFIG = {
 const SHOW_WEBCAM_PANEL = false;
 const SHOW_DEBUG_PANEL = false;
 let adminSessionToken = '';
+let participantSessionToken = '';
 const MANUAL_OVERRIDE_TABLE = 'manual_overrides';
 const PAUSE_REFLECTION_AOI_TABLE = 'pause_reflection_aoi';
 const MANUAL_OVERRIDE_CHANGE_THRESHOLD_PERCENT = 20;
@@ -505,7 +561,7 @@ async function classifyWindow(aggregatedFeatures) {
 
   try {
     const url = `${API_BASE_URL.replace(/\/$/, '')}/predict-binary`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agg_features: orderedFeatures }),
@@ -538,7 +594,8 @@ async function sbRequest(table, method, body, params, options = {}) {
   const preferHeader = options.prefer
     ? `${options.prefer},return=representation`
     : 'return=representation';
-  const res = await fetch(url, {
+  const requestFetch = method === 'GET' || options.retry ? fetchWithRetry : fetchWithTimeout;
+  const res = await requestFetch(url, {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -559,17 +616,196 @@ async function sbRequest(table, method, body, params, options = {}) {
   return res.json();
 }
 
+const RELIABILITY_DB_NAME = 'oelm-reliability';
+const RELIABILITY_STORE_NAME = 'request-outbox';
+const RELIABILITY_DB_VERSION = 1;
+let reliabilityDbPromise = null;
+let outboxFlushPromise = null;
+
+function openReliabilityDb() {
+  if (!('indexedDB' in window)) return Promise.reject(new Error('IndexedDB is unavailable'));
+  if (reliabilityDbPromise) return reliabilityDbPromise;
+  reliabilityDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(RELIABILITY_DB_NAME, RELIABILITY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RELIABILITY_STORE_NAME)) {
+        db.createObjectStore(RELIABILITY_STORE_NAME, { keyPath: 'outbox_id' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open reliability outbox'));
+  });
+  return reliabilityDbPromise;
+}
+
+async function withOutboxStore(mode, operation) {
+  const db = await openReliabilityDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(RELIABILITY_STORE_NAME, mode);
+    const store = transaction.objectStore(RELIABILITY_STORE_NAME);
+    let result;
+    try {
+      result = operation(store);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => resolve(result?.result);
+    transaction.onerror = () => reject(transaction.error || new Error('Reliability outbox transaction failed'));
+    transaction.onabort = () => reject(transaction.error || new Error('Reliability outbox transaction aborted'));
+  });
+}
+
+function outboxPut(item) {
+  return withOutboxStore('readwrite', store => store.put(item));
+}
+
+function outboxDelete(outboxId) {
+  return withOutboxStore('readwrite', store => store.delete(outboxId));
+}
+
+function outboxGetAll() {
+  return withOutboxStore('readonly', store => store.getAll());
+}
+
+function readableRequestError(error) {
+  const message = error?.message || String(error || 'Unknown request error');
+  return message.slice(0, 500);
+}
+
+function deliveryEventItem({ requestId, sessionId, userId, cohortId, pauseNumber, source, status, attempts, error }) {
+  const now = new Date().toISOString();
+  return {
+    outbox_id: `delivery-event:${requestId}:${status}`,
+    kind: 'delivery_event',
+    request_id: requestId,
+    table: 'prediction_delivery_events',
+    params: { on_conflict: 'request_id' },
+    prefer: 'resolution=merge-duplicates',
+    attempts: 0,
+    next_attempt_at: 0,
+    payload: {
+      request_id: requestId,
+      session_id: sessionId || null,
+      participant_id: userId || null,
+      cohort_id: cohortId || null,
+      pause_and_reflect_number: pauseNumber ?? null,
+      event_source: source,
+      delivery_status: status,
+      attempt_count: attempts,
+      error_message: readableRequestError(error),
+      last_attempt_at: now,
+    },
+  };
+}
+
+async function deliverOutboxItem(item) {
+  const nextAttempt = Number(item.attempts || 0) + 1;
+  const payload = { ...item.payload };
+  if (item.kind === 'prediction') {
+    payload.delivery_status = nextAttempt === 1 ? 'saved' : 'recovered';
+    payload.delivery_attempts = nextAttempt;
+  }
+  await sbRequest(item.table, 'POST', payload, item.params || null, {
+    prefer: item.prefer || undefined,
+  });
+  return { nextAttempt, payload };
+}
+
+async function flushReliabilityOutbox() {
+  if (outboxFlushPromise) return outboxFlushPromise;
+  outboxFlushPromise = (async () => {
+    const items = await outboxGetAll();
+    const now = Date.now();
+    for (const item of items) {
+      if (Number(item.next_attempt_at || 0) > now) continue;
+      try {
+        const delivered = await deliverOutboxItem(item);
+        await outboxDelete(item.outbox_id);
+        if (item.kind === 'prediction' && delivered.nextAttempt > 1) {
+          // A recovered request must be the terminal audit state. Remove any
+          // still-queued failure event so it cannot later overwrite recovery.
+          await outboxDelete(`delivery-event:${item.request_id}:failed`);
+          await outboxPut(deliveryEventItem({
+            requestId: item.request_id,
+            sessionId: item.payload.session_id,
+            userId: item.payload.participant_id,
+            cohortId: item.payload.cohort_id,
+            pauseNumber: item.payload.pause_and_reflect_number,
+            source: 'supabase',
+            status: 'recovered',
+            attempts: delivered.nextAttempt,
+            error: item.last_error || 'Recovered after a previous delivery failure',
+          }));
+        }
+      } catch (error) {
+        const attempts = Number(item.attempts || 0) + 1;
+        const retryDelayMs = Math.min(300_000, 2_000 * (2 ** Math.min(attempts - 1, 7)));
+        await outboxPut({
+          ...item,
+          attempts,
+          last_error: readableRequestError(error),
+          next_attempt_at: Date.now() + retryDelayMs,
+        });
+        if (item.kind === 'prediction' && attempts === 1) {
+          await outboxPut(deliveryEventItem({
+            requestId: item.request_id,
+            sessionId: item.payload.session_id,
+            userId: item.payload.participant_id,
+            cohortId: item.payload.cohort_id,
+            pauseNumber: item.payload.pause_and_reflect_number,
+            source: 'supabase',
+            status: 'failed',
+            attempts,
+            error,
+          }));
+        }
+      }
+    }
+  })()
+    .catch(error => console.warn('[Reliability] Could not flush request outbox:', error))
+    .finally(() => { outboxFlushPromise = null; });
+  return outboxFlushPromise;
+}
+
+async function queueReliabilityItem(item) {
+  try {
+    await outboxPut(item);
+    void flushReliabilityOutbox();
+  } catch (error) {
+    // IndexedDB can be unavailable in restricted/private browser contexts. Keep
+    // the live session running and make one direct attempt without surfacing UI.
+    console.warn('[Reliability] Browser outbox unavailable:', error);
+    try {
+      await deliverOutboxItem(item);
+    } catch (deliveryError) {
+      console.warn('[Reliability] Direct fallback delivery failed:', deliveryError);
+    }
+  }
+}
+
+function queueDeliveryEvent(details) {
+  return queueReliabilityItem(deliveryEventItem(details));
+}
+
+window.addEventListener('online', () => { void flushReliabilityOutbox(); });
+window.setInterval(() => { void flushReliabilityOutbox(); }, 5_000);
+
 async function validateCohortAccessCode(accessCode) {
   const rows = await sbRequest('rpc/validate_cohort_access_code', 'POST', {
     p_access_code: accessCode,
-  });
+  }, null, { retry: true });
   const row = Array.isArray(rows) ? rows[0] : rows;
   return row?.cohort_id ? normalizeCohortRow(row) : null;
 }
 
 async function adminRequest(action, payload = {}, token = adminSessionToken) {
   if (!ADMIN_API_URL || !SUPABASE_KEY) throw new Error('Administrator API is not configured.');
-  const res = await fetch(ADMIN_API_URL, {
+  const requestFetch = ['participant_login', 'list_cohorts', 'overview'].includes(action)
+    ? fetchWithRetry
+    : fetchWithTimeout;
+  const res = await requestFetch(ADMIN_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -581,6 +817,59 @@ async function adminRequest(action, payload = {}, token = adminSessionToken) {
   const response = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(response?.error || `Administrator API ${res.status}`);
   return response;
+}
+
+async function participantRequest(action, payload = {}, token = participantSessionToken) {
+  if (!ADMIN_API_URL || !SUPABASE_KEY || !token) {
+    throw new Error('Participant data API is not configured.');
+  }
+  // Participant writes carry an idempotent batch ID, so one bounded retry is
+  // safe if the response is lost or the service is temporarily unavailable.
+  const res = await fetchWithRetry(ADMIN_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const response = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(response?.error || `Participant data API ${res.status}`);
+  return response;
+}
+
+function restorePredictionHistory(rows) {
+  return (Array.isArray(rows) ? rows : []).map((stored, index) => {
+    const labels = stored?.labels && typeof stored.labels === 'object' ? stored.labels : {};
+    const segmentId = Number(stored?.segment_id || stored?.pause_and_reflect_number || 1);
+    const predictedAt = stored?.predicted_at || new Date().toISOString();
+    const row = {
+      predicted_at: predictedAt,
+      active_elapsed_ms: Number(stored?.active_elapsed_ms) || ((index + 1) * WINDOW_SECONDS * 1000),
+      segment_id: segmentId,
+      pause_and_reflect_number: segmentId,
+      segment_start_ts: Number(stored?.segment_start_ts) || new Date(predictedAt).getTime(),
+    };
+    for (const label of LABEL_COLS) {
+      const value = Number(labels[label]);
+      if (value === 0 || value === 1) row[label] = value;
+    }
+    return row;
+  }).filter(row => LABEL_COLS.some(label => row[label] === 0 || row[label] === 1));
+}
+
+async function saveRawBlendshapeBatch(values, startedAt, endedAt, batchId, token = participantSessionToken) {
+  if (!values.length) return null;
+  return participantRequest('save_blendshape_batch', {
+    started_at: new Date(startedAt).toISOString(),
+    ended_at: new Date(endedAt).toISOString(),
+    batch_id: batchId,
+    capture_fps: CAPTURE_FPS,
+    // Values always follow the fixed BLENDSHAPE_NAMES order in this source.
+    // Names are intentionally not repeated in every stored batch.
+    values,
+  }, token);
 }
 
 function normalizeCohortRow(row) {
@@ -610,7 +899,17 @@ async function createSession(label = '', cohortId = '', userId = '', activityTyp
   return data?.[0]?.session_id ?? data?.[0]?.id ?? null;
 }
 
-async function insertPrediction(sessionUuid, userId, prediction, aggFeatures, pauseAndReflectNumber, cohortId = '', activityType = '') {
+async function insertPrediction(
+  sessionUuid,
+  userId,
+  prediction,
+  aggFeatures,
+  pauseAndReflectNumber,
+  cohortId = '',
+  activityType = '',
+  timing = {},
+  requestId = createRequestId(),
+) {
   if (!sessionUuid) throw new Error('No authenticated session is available for the prediction save.');
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase is not configured for the prediction save.');
   if (!isBinaryPrediction(prediction)) throw new Error('A non-binary prediction cannot be saved.');
@@ -624,6 +923,7 @@ async function insertPrediction(sessionUuid, userId, prediction, aggFeatures, pa
     if (conf > maxConf) maxConf = conf;
   }
   const payload = {
+    request_id: requestId,
     session_id: sessionUuid,
     participant_id: userId || null,
     cohort_id: cohortId || null,
@@ -634,8 +934,28 @@ async function insertPrediction(sessionUuid, userId, prediction, aggFeatures, pa
     probabilities: probsFlat,
     model_version: MODEL_VERSION,
     raw_data: aggFeatures ?? null,
+    active_elapsed_ms: Number.isFinite(timing.active_elapsed_ms) ? Math.round(timing.active_elapsed_ms) : null,
+    segment_id: Number.isFinite(timing.segment_id) ? timing.segment_id : pauseAndReflectNumber ?? null,
+    segment_start_ts: Number.isFinite(timing.segment_start_ts)
+      ? new Date(timing.segment_start_ts).toISOString()
+      : null,
+    delivery_status: 'pending',
+    delivery_attempts: 0,
   };
-  await sbRequest('emotion_predictions', 'POST', payload);
+  await queueReliabilityItem({
+    outbox_id: `prediction:${requestId}`,
+    kind: 'prediction',
+    request_id: requestId,
+    table: 'emotion_predictions',
+    params: { on_conflict: 'request_id' },
+    // Ignore a duplicate if the first insert reached Supabase but its response
+    // was lost. This needs only the existing insert permission, not table-wide
+    // update permission.
+    prefer: 'resolution=ignore-duplicates',
+    attempts: 0,
+    next_attempt_at: 0,
+    payload,
+  });
 }
 
 async function savePauseReflectionAOI(metric) {
@@ -1652,6 +1972,8 @@ function App() {
   const [userId,       setUserId]       = useState('');
   const [cohortAccessCodeInput, setCohortAccessCodeInput] = useState('');
   const [authError,    setAuthError]    = useState('');
+  const [resumeNotice, setResumeNotice] = useState('');
+  const [resumePending, setResumePending] = useState(false);
   const [authReady,    setAuthReady]    = useState(false);
   const [isAdminMode,  setIsAdminMode]  = useState(false);
   const [cohortIds, setCohorts] = useState([]);
@@ -1692,6 +2014,9 @@ function App() {
   const landmarkerRef= useRef(null);
   const streamRef    = useRef(null);
   const frameBuffer  = useRef([]);
+  const rawBlendshapeBatchRef = useRef([]);
+  const rawBatchStartedAtRef = useRef(null);
+  const rawUploadChainRef = useRef(Promise.resolve());
   const gazeBuffer   = useRef([]);
   const pauseAOIRef  = useRef(emptyPauseAOITracker());
   const currentGazeAOIRef = useRef(null);
@@ -1885,6 +2210,7 @@ function App() {
         }, '');
         if (adminLogin?.token) {
           adminSessionToken = adminLogin.token;
+          participantSessionToken = '';
           setAuthError('');
           setAuthReady(false);
           setIsAdminMode(true);
@@ -1900,26 +2226,36 @@ function App() {
         }
       }
     }
-    let group = null;
+    let loginResult = null;
     try {
-      group = await validateCohortAccessCode(enteredAccessCode);
+      loginResult = await adminRequest('participant_login', {
+        participant_id: uid,
+        access_code: enteredAccessCode,
+      }, '');
     } catch (error) {
-      setAuthError('Could not validate access code: ' + String(error));
+      setAuthError('Could not login: ' + String(error));
       return;
     }
-    if (!group) {
+    if (!loginResult?.cohort?.cohort_id || !loginResult?.session?.session_id || !loginResult?.token) {
       setAuthError('Invalid access code. Access denied.');
       return;
     }
-    try {
-      const newSessionId = await createSession(uid, group.id, uid, group.activity_type || group.type || '');
-      setSessionId(newSessionId);
-      sessionRef.current = newSessionId;
-      await logEvent(newSessionId, group.id, 'session_login_success', {}, uid);
-    } catch (e) {
-      setAuthError('Login succeeded but session row creation failed: ' + String(e));
-      return;
-    }
+    const group = normalizeCohortRow(loginResult.cohort);
+    const resumedHistory = restorePredictionHistory(loginResult.predictions);
+    const activeSessionId = loginResult.session.session_id;
+    participantSessionToken = loginResult.token;
+    adminSessionToken = '';
+    setSessionId(activeSessionId);
+    sessionRef.current = activeSessionId;
+    setHistory(resumedHistory);
+    setWindowCount(resumedHistory.length);
+    setResumePending(Boolean(loginResult.resumed));
+    setResumeNotice(loginResult.resumed
+      ? `Relogin detected. Resuming your previous session with ${resumedHistory.length} saved prediction${resumedHistory.length === 1 ? '' : 's'}. Previous charts are locked.`
+      : '');
+    await logEvent(activeSessionId, group.id, loginResult.resumed ? 'session_relogin_success' : 'session_login_success', {
+      restored_prediction_count: resumedHistory.length,
+    }, uid);
     setActiveCohort(group);
     setIsAdminMode(false);
     setAuthError('');
@@ -2061,6 +2397,40 @@ function App() {
     }
   }, [buildMonitorWindow]);
 
+  const queueRawBlendshapeBatch = useCallback((force = false) => {
+    const buffered = rawBlendshapeBatchRef.current;
+    if (!buffered.length || (!force && buffered.length < RAW_BLENDSHAPE_BATCH_FRAMES)) return;
+    const frameCount = force ? buffered.length : RAW_BLENDSHAPE_BATCH_FRAMES;
+    const batch = buffered.splice(0, frameCount);
+    const startedAt = rawBatchStartedAtRef.current || Date.now();
+    const endedAt = Date.now();
+    const batchId = crypto.randomUUID();
+    const uploadToken = participantSessionToken;
+    rawBatchStartedAtRef.current = buffered.length ? endedAt : null;
+
+    rawUploadChainRef.current = rawUploadChainRef.current
+      .catch(() => {})
+      .then(async () => {
+        let lastError = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await saveRawBlendshapeBatch(batch, startedAt, endedAt, batchId, uploadToken);
+            return;
+          } catch (error) {
+            lastError = error;
+            if (attempt < 3) {
+              await new Promise(resolve => window.setTimeout(resolve, 500 * (2 ** (attempt - 1))));
+            }
+          }
+        }
+        throw lastError || new Error('Raw blendshape batch upload failed.');
+      })
+      .catch(error => {
+        console.error('[Supabase] raw blendshape batch:', error);
+        setLastError('[Supabase] raw blendshape batch: ' + String(error));
+      });
+  }, []);
+
   const processFrame = useCallback(async () => {
     const frameGeneration = processingGenerationRef.current;
     const emotionMode = runningRef.current && !pausedRef.current;
@@ -2149,6 +2519,11 @@ function App() {
     setProcessingStatus('Running emotion prediction');
     setLastError(previous => previous?.startsWith('MediaPipe frame processing failed:') ? null : previous);
     setFrameCount(c => c + 1);
+    if (!rawBlendshapeBatchRef.current.length) rawBatchStartedAtRef.current = Date.now();
+    rawBlendshapeBatchRef.current.push(
+      BLENDSHAPE_NAMES.map(name => Number(features[name] ?? 0)),
+    );
+    queueRawBlendshapeBatch(false);
     frameBuffer.current.push(features);
     const len = frameBuffer.current.length;
     setBufferLen(len);
@@ -2158,17 +2533,32 @@ function App() {
       frameBuffer.current = []; setBufferLen(0);
       const agg = aggregateWindow(snapshot);
       if (!agg) { rafRef.current = scheduleFrameRef.current(processFrame); return; }
+      const requestId = createRequestId();
       let prediction = null;
       try { prediction = await classifyWindow(agg); }
       catch(e) {
         if (frameGeneration === processingGenerationRef.current) {
-          setLastError('[HF Space] ' + String(e));
+          console.warn('[HF Space] prediction request failed:', e);
         }
       }
       // A pause, resume, or stop happened while the API request was in flight.
       // The newly selected processing mode owns the frame loop now.
       if (frameGeneration !== processingGenerationRef.current) return;
       // Ignore a response that arrives after the learner has entered reflection.
+      if (!prediction && runningRef.current && !pausedRef.current) {
+        const currentCohort = activeCohortRef.current;
+        void queueDeliveryEvent({
+          requestId,
+          sessionId: sessionRef.current,
+          userId: userIdRef.current,
+          cohortId: currentCohort?.id || null,
+          pauseNumber: activeSegmentRef.current,
+          source: 'hugging_face',
+          status: 'missed',
+          attempts: 2,
+          error: 'No valid prediction was returned after the retry policy',
+        });
+      }
       if (prediction && runningRef.current && !pausedRef.current) {
         const currentCohort = activeCohortRef.current;
         const currentUserId = userIdRef.current;
@@ -2185,7 +2575,9 @@ function App() {
         row.pause_and_reflect_number = activeSegmentRef.current;
         row.segment_start_ts = segmentStartedAtWallClockRef.current;
         for (const lbl of LABEL_COLS) if (prediction[lbl] !== undefined) row[lbl] = prediction[lbl].label;
-        setHistory(h => [...h.slice(-179), row]);
+        // Keep the recovered session timeline available after reconnecting.
+        // 5,000 rows is roughly 14 hours at one prediction every 10 seconds.
+        setHistory(h => [...h.slice(-4999), row]);
         insertPrediction(
           sessionRef.current,
           currentUserId,
@@ -2194,19 +2586,36 @@ function App() {
           activeSegmentRef.current,
           currentCohort?.id || null,
           currentCohort?.activity_type || currentCohort?.type || null,
+          {
+            active_elapsed_ms: activeElapsedMs,
+            segment_id: activeSegmentRef.current,
+            segment_start_ts: segmentStartedAtWallClockRef.current,
+          },
+          requestId,
         )
-          .catch(e => setLastError('[supabase] insertPrediction: ' + String(e)));
+          .catch(e => console.warn('[Supabase] Could not queue prediction delivery:', e));
       }
     }
     rafRef.current = scheduleFrameRef.current(processFrame);
-  }, []);
+  }, [queueRawBlendshapeBatch]);
 
   const handleStart = useCallback(async () => {
     if (!modelReady) { setLastError('MediaPipe model still loading.'); return; }
     const monitorOpened = await openMonitorWindow();
     if (!monitorOpened) return;
-    setLastError(null); setProcessingStatus('Starting'); setHistory([]); setCurrentPreds(null);
-    setFrameCount(0); setWindowCount(0); setBufferLen(0);
+    const recoveredHistory = resumePending ? history : [];
+    const recoveredElapsedMs = recoveredHistory.reduce(
+      (maxValue, row) => Math.max(maxValue, Number(row.active_elapsed_ms) || 0),
+      0,
+    );
+    const recoveredSegment = recoveredHistory.reduce(
+      (maxValue, row) => Math.max(maxValue, Number(row.segment_id) || 1),
+      0,
+    );
+    setLastError(null); setProcessingStatus('Starting');
+    if (!resumePending) setHistory([]);
+    setCurrentPreds(null);
+    setFrameCount(0); setWindowCount(recoveredHistory.length); setBufferLen(0);
     currentGazeAOIRef.current = null;
     gazeStatsRef.current = {
       insideRatio: null,
@@ -2216,15 +2625,21 @@ function App() {
       totalFrames: 0,
       status: 'WAITING',
     };
-    setOverrides({});
-    setManualEditCount(0);
+    if (!resumePending) {
+      setOverrides({});
+      setManualEditCount(0);
+    }
     pauseAOIRef.current = emptyPauseAOITracker();
     setCurrentPauseAOIPercent(null);
     frameBuffer.current = []; gazeBuffer.current = []; throttleRef.current = 0;
+    rawBlendshapeBatchRef.current = [];
+    rawBatchStartedAtRef.current = null;
     processingGenerationRef.current += 1;
-    activeElapsedBeforePauseRef.current = 0;
+    activeElapsedBeforePauseRef.current = recoveredElapsedMs;
     activeRunStartedAtRef.current = performance.now();
-    activeSegmentRef.current = 1;
+    // A reconnect boundary locks all restored segments. New predictions are
+    // appended under the next segment in the same database session.
+    activeSegmentRef.current = resumePending ? Math.max(1, recoveredSegment + 1) : 1;
     segmentStartedAtWallClockRef.current = Date.now();
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); }
@@ -2254,8 +2669,9 @@ function App() {
     }, userId);
     runningRef.current = true; pausedRef.current = false;
     setRunning(true); setPaused(false);
+    setResumePending(false);
     rafRef.current = scheduleFrameRef.current(processFrame);
-  }, [modelReady, contentUrl, processFrame, userId, activeCohort, openMonitorWindow, closeMonitorWindow]);
+  }, [modelReady, contentUrl, processFrame, userId, activeCohort, openMonitorWindow, closeMonitorWindow, resumePending, history]);
 
   const handleOpenSmallWindow = useCallback(() => {
     openMonitorWindow();
@@ -2338,6 +2754,7 @@ function App() {
     );
     activeRunStartedAtRef.current = null;
     // Discard a partial emotion window so it cannot span across reflection time.
+    queueRawBlendshapeBatch(true);
     frameBuffer.current = [];
     gazeBuffer.current = [];
     setBufferLen(0);
@@ -2358,9 +2775,10 @@ function App() {
     if (rafRef.current) cancelFrameRef.current(rafRef.current);
     rafRef.current = scheduleFrameRef.current(processFrame);
     logEvent(sessionRef.current, activeCohort?.id || null, 'session_paused', {}, userId).catch(() => {});
-  }, [running, paused, processFrame, activeCohort, beginPauseAOI, finalizePauseAOI]);
+  }, [running, paused, processFrame, activeCohort, beginPauseAOI, finalizePauseAOI, queueRawBlendshapeBatch]);
 
   const handleStop = useCallback(() => {
+    queueRawBlendshapeBatch(true);
     if (pausedRef.current) finalizePauseAOI('stopped');
     if (sessionRef.current) {
       logEvent(sessionRef.current, activeCohort?.id || null, 'session_stopped', {}, userId).catch(() => {});
@@ -2392,7 +2810,7 @@ function App() {
     pauseAOIRef.current = emptyPauseAOITracker();
     setCurrentPauseAOIPercent(null);
     closeMonitorWindow();
-  }, [activeCohort, closeMonitorWindow, finalizePauseAOI]);
+  }, [activeCohort, closeMonitorWindow, finalizePauseAOI, queueRawBlendshapeBatch]);
 
   pauseActionRef.current = handlePauseToggle;
   stopActionRef.current = handleStop;
@@ -2421,10 +2839,13 @@ function App() {
     setAuthReady(false);
     setIsAdminMode(false);
     adminSessionToken = '';
+    participantSessionToken = '';
     setSelectedAdminCohortId(null);
     setUserId('');
     setCohortAccessCodeInput('');
     setAuthError('');
+    setResumeNotice('');
+    setResumePending(false);
     setSessionId(null);
     sessionRef.current = null;
     setActiveCohort(null);
@@ -2886,6 +3307,7 @@ function App() {
 
     configWarn && e('div', { className:'banner warn' }, 'Warning: ' + configWarn),
     lastError  && e('div', { className:'banner error' }, 'Warning: ' + lastError),
+    resumeNotice && e('div', { className:'banner info' }, resumeNotice),
     monitorNotice && e('div', { className:'banner warn' }, monitorNotice),
 
     e('div', { className:'control-bar' },

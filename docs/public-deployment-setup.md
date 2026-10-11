@@ -15,6 +15,13 @@ Then run `docs/supabase-raw-blendshape-session-recovery.sql`. It adds the
 value-only raw blendshape batch table and the prediction timing fields required
 to resume an existing participant session accurately.
 
+Before deploying the request-reliability frontend, also run
+`docs/supabase-prediction-reliability.sql`. It adds idempotent prediction
+request IDs, backend-only delivery fields, and the
+`prediction_delivery_events` audit table. If the frontend is deployed before
+this migration, new predictions remain in the browser outbox until the schema
+is available.
+
 ## 2. Configure the administrator Edge Function
 
 Deploy `supabase/functions/oelm-admin/index.ts` as the `oelm-admin` function with
@@ -65,6 +72,9 @@ design; never return a secret or service-role key from `public_config`.
 6. Confirm a direct browser request to `/rest/v1/login_credentials` is denied.
 7. Confirm the prediction request uses `/predict-binary` and returns only Low
    and High labels.
+8. Confirm `emotion_predictions.request_id` is populated and unique, then
+   briefly test an offline/online transition and confirm the queued row is
+   eventually marked `recovered`.
 
 Participant isolation is a separate database change. Until owner-based RLS is
 installed on sessions and child tables, do not assume one participant is unable

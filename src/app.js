@@ -3,13 +3,66 @@ import { createRoot } from 'react-dom/client';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 import { FEATURE_ORDER } from './data/featureOrder.js';
 
+const API_REQUEST_TIMEOUT_MS = 5_000;
+const API_RETRY_DELAY_MS = 250;
+
+class ApiTimeoutError extends Error {
+  constructor(url) {
+    super(`Request timed out after ${API_REQUEST_TIMEOUT_MS}ms: ${url}`);
+    this.name = 'ApiTimeoutError';
+    this.retryable = true;
+  }
+}
+
+function wait(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new ApiTimeoutError(String(url));
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function isRetryableHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function fetchWithRetry(url, options = {}, maxAttempts = 2) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, options);
+      if (!isRetryableHttpStatus(response.status) || attempt === maxAttempts) return response;
+      lastError = new Error(`HTTP ${response.status}: ${url}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) throw error;
+    }
+    await wait(API_RETRY_DELAY_MS * attempt + Math.floor(Math.random() * 100));
+  }
+  throw lastError;
+}
+
+function createRequestId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
 async function loadPublicRuntimeConfig() {
   const config = window.OELM_CONFIG || {};
   if (config.SUPABASE_URL && config.SUPABASE_KEY && (config.API_BASE_URL || config.HF_SPACE_URL)) return;
   if (!config.PUBLIC_CONFIG_URL) return;
 
   try {
-    const response = await fetch(config.PUBLIC_CONFIG_URL, {
+    const response = await fetchWithRetry(config.PUBLIC_CONFIG_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'public_config' }),
@@ -508,7 +561,7 @@ async function classifyWindow(aggregatedFeatures) {
 
   try {
     const url = `${API_BASE_URL.replace(/\/$/, '')}/predict-binary`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agg_features: orderedFeatures }),
@@ -541,7 +594,8 @@ async function sbRequest(table, method, body, params, options = {}) {
   const preferHeader = options.prefer
     ? `${options.prefer},return=representation`
     : 'return=representation';
-  const res = await fetch(url, {
+  const requestFetch = method === 'GET' || options.retry ? fetchWithRetry : fetchWithTimeout;
+  const res = await requestFetch(url, {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -562,17 +616,196 @@ async function sbRequest(table, method, body, params, options = {}) {
   return res.json();
 }
 
+const RELIABILITY_DB_NAME = 'oelm-reliability';
+const RELIABILITY_STORE_NAME = 'request-outbox';
+const RELIABILITY_DB_VERSION = 1;
+let reliabilityDbPromise = null;
+let outboxFlushPromise = null;
+
+function openReliabilityDb() {
+  if (!('indexedDB' in window)) return Promise.reject(new Error('IndexedDB is unavailable'));
+  if (reliabilityDbPromise) return reliabilityDbPromise;
+  reliabilityDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(RELIABILITY_DB_NAME, RELIABILITY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RELIABILITY_STORE_NAME)) {
+        db.createObjectStore(RELIABILITY_STORE_NAME, { keyPath: 'outbox_id' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open reliability outbox'));
+  });
+  return reliabilityDbPromise;
+}
+
+async function withOutboxStore(mode, operation) {
+  const db = await openReliabilityDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(RELIABILITY_STORE_NAME, mode);
+    const store = transaction.objectStore(RELIABILITY_STORE_NAME);
+    let result;
+    try {
+      result = operation(store);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => resolve(result?.result);
+    transaction.onerror = () => reject(transaction.error || new Error('Reliability outbox transaction failed'));
+    transaction.onabort = () => reject(transaction.error || new Error('Reliability outbox transaction aborted'));
+  });
+}
+
+function outboxPut(item) {
+  return withOutboxStore('readwrite', store => store.put(item));
+}
+
+function outboxDelete(outboxId) {
+  return withOutboxStore('readwrite', store => store.delete(outboxId));
+}
+
+function outboxGetAll() {
+  return withOutboxStore('readonly', store => store.getAll());
+}
+
+function readableRequestError(error) {
+  const message = error?.message || String(error || 'Unknown request error');
+  return message.slice(0, 500);
+}
+
+function deliveryEventItem({ requestId, sessionId, userId, cohortId, pauseNumber, source, status, attempts, error }) {
+  const now = new Date().toISOString();
+  return {
+    outbox_id: `delivery-event:${requestId}:${status}`,
+    kind: 'delivery_event',
+    request_id: requestId,
+    table: 'prediction_delivery_events',
+    params: { on_conflict: 'request_id' },
+    prefer: 'resolution=merge-duplicates',
+    attempts: 0,
+    next_attempt_at: 0,
+    payload: {
+      request_id: requestId,
+      session_id: sessionId || null,
+      participant_id: userId || null,
+      cohort_id: cohortId || null,
+      pause_and_reflect_number: pauseNumber ?? null,
+      event_source: source,
+      delivery_status: status,
+      attempt_count: attempts,
+      error_message: readableRequestError(error),
+      last_attempt_at: now,
+    },
+  };
+}
+
+async function deliverOutboxItem(item) {
+  const nextAttempt = Number(item.attempts || 0) + 1;
+  const payload = { ...item.payload };
+  if (item.kind === 'prediction') {
+    payload.delivery_status = nextAttempt === 1 ? 'saved' : 'recovered';
+    payload.delivery_attempts = nextAttempt;
+  }
+  await sbRequest(item.table, 'POST', payload, item.params || null, {
+    prefer: item.prefer || undefined,
+  });
+  return { nextAttempt, payload };
+}
+
+async function flushReliabilityOutbox() {
+  if (outboxFlushPromise) return outboxFlushPromise;
+  outboxFlushPromise = (async () => {
+    const items = await outboxGetAll();
+    const now = Date.now();
+    for (const item of items) {
+      if (Number(item.next_attempt_at || 0) > now) continue;
+      try {
+        const delivered = await deliverOutboxItem(item);
+        await outboxDelete(item.outbox_id);
+        if (item.kind === 'prediction' && delivered.nextAttempt > 1) {
+          // A recovered request must be the terminal audit state. Remove any
+          // still-queued failure event so it cannot later overwrite recovery.
+          await outboxDelete(`delivery-event:${item.request_id}:failed`);
+          await outboxPut(deliveryEventItem({
+            requestId: item.request_id,
+            sessionId: item.payload.session_id,
+            userId: item.payload.participant_id,
+            cohortId: item.payload.cohort_id,
+            pauseNumber: item.payload.pause_and_reflect_number,
+            source: 'supabase',
+            status: 'recovered',
+            attempts: delivered.nextAttempt,
+            error: item.last_error || 'Recovered after a previous delivery failure',
+          }));
+        }
+      } catch (error) {
+        const attempts = Number(item.attempts || 0) + 1;
+        const retryDelayMs = Math.min(300_000, 2_000 * (2 ** Math.min(attempts - 1, 7)));
+        await outboxPut({
+          ...item,
+          attempts,
+          last_error: readableRequestError(error),
+          next_attempt_at: Date.now() + retryDelayMs,
+        });
+        if (item.kind === 'prediction' && attempts === 1) {
+          await outboxPut(deliveryEventItem({
+            requestId: item.request_id,
+            sessionId: item.payload.session_id,
+            userId: item.payload.participant_id,
+            cohortId: item.payload.cohort_id,
+            pauseNumber: item.payload.pause_and_reflect_number,
+            source: 'supabase',
+            status: 'failed',
+            attempts,
+            error,
+          }));
+        }
+      }
+    }
+  })()
+    .catch(error => console.warn('[Reliability] Could not flush request outbox:', error))
+    .finally(() => { outboxFlushPromise = null; });
+  return outboxFlushPromise;
+}
+
+async function queueReliabilityItem(item) {
+  try {
+    await outboxPut(item);
+    void flushReliabilityOutbox();
+  } catch (error) {
+    // IndexedDB can be unavailable in restricted/private browser contexts. Keep
+    // the live session running and make one direct attempt without surfacing UI.
+    console.warn('[Reliability] Browser outbox unavailable:', error);
+    try {
+      await deliverOutboxItem(item);
+    } catch (deliveryError) {
+      console.warn('[Reliability] Direct fallback delivery failed:', deliveryError);
+    }
+  }
+}
+
+function queueDeliveryEvent(details) {
+  return queueReliabilityItem(deliveryEventItem(details));
+}
+
+window.addEventListener('online', () => { void flushReliabilityOutbox(); });
+window.setInterval(() => { void flushReliabilityOutbox(); }, 5_000);
+
 async function validateCohortAccessCode(accessCode) {
   const rows = await sbRequest('rpc/validate_cohort_access_code', 'POST', {
     p_access_code: accessCode,
-  });
+  }, null, { retry: true });
   const row = Array.isArray(rows) ? rows[0] : rows;
   return row?.cohort_id ? normalizeCohortRow(row) : null;
 }
 
 async function adminRequest(action, payload = {}, token = adminSessionToken) {
   if (!ADMIN_API_URL || !SUPABASE_KEY) throw new Error('Administrator API is not configured.');
-  const res = await fetch(ADMIN_API_URL, {
+  const requestFetch = ['participant_login', 'list_cohorts', 'overview'].includes(action)
+    ? fetchWithRetry
+    : fetchWithTimeout;
+  const res = await requestFetch(ADMIN_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -590,7 +823,9 @@ async function participantRequest(action, payload = {}, token = participantSessi
   if (!ADMIN_API_URL || !SUPABASE_KEY || !token) {
     throw new Error('Participant data API is not configured.');
   }
-  const res = await fetch(ADMIN_API_URL, {
+  // Participant writes carry an idempotent batch ID, so one bounded retry is
+  // safe if the response is lost or the service is temporarily unavailable.
+  const res = await fetchWithRetry(ADMIN_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -673,6 +908,7 @@ async function insertPrediction(
   cohortId = '',
   activityType = '',
   timing = {},
+  requestId = createRequestId(),
 ) {
   if (!sessionUuid) throw new Error('No authenticated session is available for the prediction save.');
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase is not configured for the prediction save.');
@@ -687,6 +923,7 @@ async function insertPrediction(
     if (conf > maxConf) maxConf = conf;
   }
   const payload = {
+    request_id: requestId,
     session_id: sessionUuid,
     participant_id: userId || null,
     cohort_id: cohortId || null,
@@ -702,8 +939,23 @@ async function insertPrediction(
     segment_start_ts: Number.isFinite(timing.segment_start_ts)
       ? new Date(timing.segment_start_ts).toISOString()
       : null,
+    delivery_status: 'pending',
+    delivery_attempts: 0,
   };
-  await sbRequest('emotion_predictions', 'POST', payload);
+  await queueReliabilityItem({
+    outbox_id: `prediction:${requestId}`,
+    kind: 'prediction',
+    request_id: requestId,
+    table: 'emotion_predictions',
+    params: { on_conflict: 'request_id' },
+    // Ignore a duplicate if the first insert reached Supabase but its response
+    // was lost. This needs only the existing insert permission, not table-wide
+    // update permission.
+    prefer: 'resolution=ignore-duplicates',
+    attempts: 0,
+    next_attempt_at: 0,
+    payload,
+  });
 }
 
 async function savePauseReflectionAOI(metric) {
@@ -2281,17 +2533,32 @@ function App() {
       frameBuffer.current = []; setBufferLen(0);
       const agg = aggregateWindow(snapshot);
       if (!agg) { rafRef.current = scheduleFrameRef.current(processFrame); return; }
+      const requestId = createRequestId();
       let prediction = null;
       try { prediction = await classifyWindow(agg); }
       catch(e) {
         if (frameGeneration === processingGenerationRef.current) {
-          setLastError('[HF Space] ' + String(e));
+          console.warn('[HF Space] prediction request failed:', e);
         }
       }
       // A pause, resume, or stop happened while the API request was in flight.
       // The newly selected processing mode owns the frame loop now.
       if (frameGeneration !== processingGenerationRef.current) return;
       // Ignore a response that arrives after the learner has entered reflection.
+      if (!prediction && runningRef.current && !pausedRef.current) {
+        const currentCohort = activeCohortRef.current;
+        void queueDeliveryEvent({
+          requestId,
+          sessionId: sessionRef.current,
+          userId: userIdRef.current,
+          cohortId: currentCohort?.id || null,
+          pauseNumber: activeSegmentRef.current,
+          source: 'hugging_face',
+          status: 'missed',
+          attempts: 2,
+          error: 'No valid prediction was returned after the retry policy',
+        });
+      }
       if (prediction && runningRef.current && !pausedRef.current) {
         const currentCohort = activeCohortRef.current;
         const currentUserId = userIdRef.current;
@@ -2324,8 +2591,9 @@ function App() {
             segment_id: activeSegmentRef.current,
             segment_start_ts: segmentStartedAtWallClockRef.current,
           },
+          requestId,
         )
-          .catch(e => setLastError('[supabase] insertPrediction: ' + String(e)));
+          .catch(e => console.warn('[Supabase] Could not queue prediction delivery:', e));
       }
     }
     rafRef.current = scheduleFrameRef.current(processFrame);

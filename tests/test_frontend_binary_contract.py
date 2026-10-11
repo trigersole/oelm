@@ -25,7 +25,25 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertIn("if (!isBinaryPrediction(prediction)) throw new Error", self.source)
         self.assertIn("/predict-binary`;", self.source)
         self.assertNotIn("${API_BASE_URL}/api/predict", self.source)
-        self.assertIn("await sbRequest('emotion_predictions', 'POST', payload)", self.source)
+        self.assertIn("table: 'emotion_predictions'", self.source)
+        self.assertIn("params: { on_conflict: 'request_id' }", self.source)
+
+    def test_prediction_delivery_is_timeout_bounded_and_idempotent(self) -> None:
+        required_fragments = [
+            "const API_REQUEST_TIMEOUT_MS = 5_000;",
+            "async function fetchWithTimeout",
+            "async function fetchWithRetry",
+            "const requestId = createRequestId();",
+            "request_id: requestId",
+            "delivery_status: 'pending'",
+            "const RELIABILITY_DB_NAME = 'oelm-reliability';",
+            "window.addEventListener('online'",
+            "table: 'prediction_delivery_events'",
+            "['participant_login', 'list_cohorts', 'overview'].includes(action)",
+        ]
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
 
     def test_small_chart_segments_are_left_unlabelled(self) -> None:
         self.assertNotIn("barLabelAnnotations", self.source)
@@ -55,6 +73,7 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertIn("queueRawBlendshapeBatch(false)", self.source)
         self.assertIn("queueRawBlendshapeBatch(true)", self.source)
         self.assertIn("participantRequest('save_blendshape_batch'", self.source)
+        self.assertIn("const res = await fetchWithRetry(ADMIN_API_URL", self.source)
         self.assertNotIn("CompressionStream", self.source)
 
     def test_participant_relogin_restores_binary_history(self) -> None:
