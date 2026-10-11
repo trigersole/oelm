@@ -67,16 +67,47 @@ async function createAdminToken(secret: string) {
   return `${payload}.${await hmac(payload, secret)}`;
 }
 
-async function verifyAdminToken(token: string, secret: string) {
+async function readSignedToken(token: string, secret: string) {
   const [payload, signature] = token.split(".");
-  if (!payload || !signature || !(await safeEqual(signature, await hmac(payload, secret)))) return false;
+  if (!payload || !signature || !(await safeEqual(signature, await hmac(payload, secret)))) return null;
   try {
     const normalized = payload.replaceAll("-", "+").replaceAll("_", "/");
     const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
     const decoded = JSON.parse(atob(padded));
-    return decoded?.role === "oelm-admin" && Number(decoded?.exp) > Date.now();
+    return Number(decoded?.exp) > Date.now() ? decoded : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+async function verifyAdminToken(token: string, secret: string) {
+  const decoded = await readSignedToken(token, secret);
+  return decoded?.role === "oelm-admin";
+}
+
+async function createParticipantToken(
+  secret: string,
+  participantId: string,
+  cohortId: string,
+  sessionId: string,
+) {
+  const body = {
+    role: "oelm-participant",
+    participant_id: participantId,
+    cohort_id: cohortId,
+    session_id: sessionId,
+    exp: Date.now() + 12 * 60 * 60 * 1000,
+  };
+  const payload = base64url(encoder.encode(JSON.stringify(body)));
+  return `${payload}.${await hmac(payload, secret)}`;
+}
+
+function normalizeStoredLabel(value: unknown) {
+  if (typeof value !== "string") return value || {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
   }
 }
 
@@ -115,11 +146,154 @@ Deno.serve(async request => {
   const adminPassword = Deno.env.get("OELM_ADMIN_PASSWORD") || "";
   const sessionSecret = Deno.env.get("OELM_ADMIN_SESSION_SECRET") || "";
   const supabaseSecret = Deno.env.get("OELM_SUPABASE_SECRET_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-  if (!adminId || !adminPassword || !sessionSecret || !supabaseUrl || !supabaseSecret) {
-    return json({ error: "Administrator service is not configured." }, 503, origin);
+  if (!sessionSecret || !supabaseUrl || !supabaseSecret) {
+    return json({ error: "Application data service is not configured." }, 503, origin);
+  }
+
+  const db = createClient(supabaseUrl, supabaseSecret, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  if (input?.action === "participant_login") {
+    const participantId = String(input?.participant_id || "").trim();
+    const accessCode = String(input?.access_code || "").trim();
+    if (!/^\d+$/.test(participantId) || !accessCode) {
+      return json({ error: "Participant ID and access code are required." }, 400, origin);
+    }
+
+    const { data: cohorts, error: cohortError } = await db.from("login_credentials")
+      .select("cohort_id,created_at,activity_type,task_description,active")
+      .eq("access_code", accessCode)
+      .or("active.eq.true,active.is.null")
+      .limit(1);
+    if (cohortError) return json({ error: cohortError.message }, 500, origin);
+    const cohort = cohorts?.[0];
+    if (!cohort?.cohort_id) return json({ error: "Invalid access code. Access denied." }, 401, origin);
+
+    const cohortId = String(cohort.cohort_id);
+    const { data: previousSessions, error: sessionLookupError } = await db.from("sessions")
+      .select("id,session_id,label,created_at,cohort_id,activity_type,participant_id")
+      .eq("cohort_id", cohortId)
+      .eq("participant_id", participantId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (sessionLookupError) return json({ error: sessionLookupError.message }, 500, origin);
+
+    let session = previousSessions?.[0] || null;
+    const resumed = Boolean(session);
+    if (!session) {
+      const sessionId = crypto.randomUUID();
+      const { data: created, error: createError } = await db.from("sessions").insert({
+        session_id: sessionId,
+        label: participantId,
+        participant_id: participantId,
+        cohort_id: cohortId,
+        activity_type: cohort.activity_type || "without_edit",
+        created_at: new Date().toISOString(),
+      }).select("id,session_id,label,created_at,cohort_id,activity_type,participant_id").single();
+      if (createError) return json({ error: createError.message }, 500, origin);
+      session = created;
+    }
+
+    const sessionId = String(session?.session_id || session?.id || "");
+    const loadPredictions = async (columns: string) => {
+      const rows: Record<string, unknown>[] = [];
+      for (let offset = 0; offset < 5000; offset += 1000) {
+        const page = await db.from("emotion_predictions")
+          .select(columns)
+          .eq("session_id", sessionId)
+          .eq("model_version", "xgb-binary-v1")
+          .order("predicted_at", { ascending: true })
+          .range(offset, offset + 999);
+        if (page.error) return { data: null, error: page.error };
+        rows.push(...(page.data || []));
+        if ((page.data || []).length < 1000) break;
+      }
+      return { data: rows, error: null };
+    };
+
+    let predictionQuery = await loadPredictions(
+      "predicted_at,label,pause_and_reflect_number,active_elapsed_ms,segment_id,segment_start_ts,model_version",
+    );
+    // This fallback keeps existing deployments usable while the migration is
+    // being applied. Exact elapsed-time restoration starts after the new
+    // columns exist.
+    if (predictionQuery.error && /active_elapsed_ms|segment_id|segment_start_ts/i.test(predictionQuery.error.message)) {
+      predictionQuery = await loadPredictions("predicted_at,label,pause_and_reflect_number,model_version");
+    }
+    if (predictionQuery.error) return json({ error: predictionQuery.error.message }, 500, origin);
+
+    const predictions = (predictionQuery.data || []).map((row, index) => ({
+      predicted_at: row.predicted_at,
+      labels: normalizeStoredLabel(row.label),
+      pause_and_reflect_number: row.pause_and_reflect_number || row.segment_id || 1,
+      segment_id: row.segment_id || row.pause_and_reflect_number || 1,
+      active_elapsed_ms: row.active_elapsed_ms || ((index + 1) * 10_000),
+      segment_start_ts: row.segment_start_ts ? new Date(String(row.segment_start_ts)).getTime() : null,
+    }));
+
+    return json({
+      token: await createParticipantToken(sessionSecret, participantId, cohortId, sessionId),
+      expires_in: 12 * 60 * 60,
+      resumed,
+      cohort: {
+        cohort_id: cohortId,
+        created_at: cohort.created_at,
+        activity_type: cohort.activity_type,
+        task_description: cohort.task_description,
+      },
+      session: { ...session, session_id: sessionId },
+      predictions,
+    }, 200, origin);
+  }
+
+  if (input?.action === "save_blendshape_batch") {
+    const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    const participant = await readSignedToken(bearer, sessionSecret);
+    if (participant?.role !== "oelm-participant") {
+      return json({ error: "Participant session is invalid or expired." }, 401, origin);
+    }
+
+    const values = input?.values;
+    const expectedFeatureCount = 52;
+    if (!Array.isArray(values) || values.length < 1 || values.length > 300) {
+      return json({ error: "A batch must contain between 1 and 300 frames." }, 400, origin);
+    }
+    const validValues = values.every((frame: unknown) =>
+      Array.isArray(frame) && frame.length === expectedFeatureCount &&
+      frame.every(value => Number.isFinite(value) && Number(value) >= 0 && Number(value) <= 1)
+    );
+    if (!validValues) return json({ error: "Blendshape batch values are invalid." }, 400, origin);
+
+    const startedAt = new Date(input?.started_at || "");
+    const endedAt = new Date(input?.ended_at || "");
+    if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(endedAt.getTime()) || endedAt < startedAt) {
+      return json({ error: "Blendshape batch timestamps are invalid." }, 400, origin);
+    }
+
+    const batchId = String(input?.batch_id || "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(batchId)) {
+      return json({ error: "Blendshape batch ID is invalid." }, 400, origin);
+    }
+
+    const { error } = await db.from("raw_blendshape_batches").upsert({
+      batch_id: batchId,
+      session_id: participant.session_id,
+      participant_id: participant.participant_id,
+      cohort_id: participant.cohort_id,
+      started_at: startedAt.toISOString(),
+      ended_at: endedAt.toISOString(),
+      capture_fps: Number(input?.capture_fps) || 5,
+      frame_count: values.length,
+      feature_count: expectedFeatureCount,
+      values,
+    }, { onConflict: "batch_id", ignoreDuplicates: true });
+    if (error) return json({ error: error.message }, 500, origin);
+    return json({ saved: true, frame_count: values.length }, 200, origin);
   }
 
   if (input?.action === "login") {
+    if (!adminId || !adminPassword) return json({ error: "Administrator service is not configured." }, 503, origin);
     const validId = await safeEqual(String(input?.admin_id || ""), adminId);
     const validPassword = await safeEqual(String(input?.password || ""), adminPassword);
     if (!validId || !validPassword) return json({ error: "Invalid administrator credentials." }, 401, origin);
@@ -130,10 +304,6 @@ Deno.serve(async request => {
   if (!(await verifyAdminToken(bearer, sessionSecret))) {
     return json({ error: "Administrator session is invalid or expired." }, 401, origin);
   }
-
-  const db = createClient(supabaseUrl, supabaseSecret, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
 
   if (input?.action === "list_cohorts") {
     const { data, error } = await db.from("login_credentials")

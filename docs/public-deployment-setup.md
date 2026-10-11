@@ -11,6 +11,10 @@ Back up the Supabase project, then run
 creates `validate_cohort_access_code`, permits visitors to validate one code,
 and removes direct browser access to `login_credentials`.
 
+Then run `docs/supabase-raw-blendshape-session-recovery.sql`. It adds the
+value-only raw blendshape batch table and the prediction timing fields required
+to resume an existing participant session accurately.
+
 ## 2. Configure the administrator Edge Function
 
 Deploy `supabase/functions/oelm-admin/index.ts` as the `oelm-admin` function with

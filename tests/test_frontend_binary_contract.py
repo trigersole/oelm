@@ -49,6 +49,20 @@ class FrontendBinaryContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
 
+    def test_raw_blendshapes_are_batched_as_value_arrays(self) -> None:
+        self.assertIn("const RAW_BLENDSHAPE_BATCH_SECONDS = 30;", self.source)
+        self.assertIn("BLENDSHAPE_NAMES.map(name => Number(features[name] ?? 0))", self.source)
+        self.assertIn("queueRawBlendshapeBatch(false)", self.source)
+        self.assertIn("queueRawBlendshapeBatch(true)", self.source)
+        self.assertIn("participantRequest('save_blendshape_batch'", self.source)
+        self.assertNotIn("CompressionStream", self.source)
+
+    def test_participant_relogin_restores_binary_history(self) -> None:
+        self.assertIn("adminRequest('participant_login'", self.source)
+        self.assertIn("restorePredictionHistory(loginResult.predictions)", self.source)
+        self.assertIn("Relogin detected. Resuming your previous session", self.source)
+        self.assertIn("activeSegmentRef.current = resumePending", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,6 +112,7 @@
   .banner { padding:0.5rem 1rem; border-radius:7px; font-size:0.8rem; margin-bottom:0.75rem; }
   .banner.error { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3); color:var(--red); }
   .banner.warn  { background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.25); color:var(--amber); }
+  .banner.info  { background:rgba(56,189,248,.08); border:1px solid rgba(56,189,248,.28); color:#7dd3fc; }
 
   details { margin-top:0.75rem; }
   summary { font-family:var(--mono); font-size:0.7rem; color:var(--muted); cursor:pointer; user-select:none; list-style:none; display:flex; align-items:center; gap:0.4rem; padding:0.4rem 0; }
