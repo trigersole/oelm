@@ -71,9 +71,9 @@ as $$
 begin
   if exists (
     select 1
-    from public.sessions
-    where session_id = new.session_id
-      and status = 'locked'
+    from public.sessions as session_row
+    where session_row.session_id::text = new.session_id::text
+      and session_row.status = 'locked'
   ) then
     raise exception 'SESSION_LOCKED: this class session no longer accepts data.';
   end if;

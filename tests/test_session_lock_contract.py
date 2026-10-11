@@ -33,6 +33,7 @@ class SessionLockContractTests(unittest.TestCase):
         self.assertIn("set active = false", self.sql)
         self.assertIn("status = 'locked'", self.sql)
         self.assertIn("SESSION_LOCKED", self.sql)
+        self.assertIn("session_row.session_id::text = new.session_id::text", self.sql)
         self.assertNotIn("pg_advisory_xact_lock", self.sql)
         self.assertNotIn("perform 1", self.sql.lower())
 
