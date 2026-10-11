@@ -99,6 +99,7 @@ const WINDOW_SECONDS = 10;
 const WINDOW_FRAMES  = CAPTURE_FPS * WINDOW_SECONDS;  // 50
 const RAW_BLENDSHAPE_BATCH_SECONDS = 30;
 const RAW_BLENDSHAPE_BATCH_FRAMES = CAPTURE_FPS * RAW_BLENDSHAPE_BATCH_SECONDS;
+const SESSION_STATUS_POLL_MS = 120_000;
 const MODEL_VERSION  = 'xgb260-static-seed1729-v1';
 const FEATURE_SCHEMA = '52-blendshapes-x-mean-std-min-max-median';
 const SINGAPORE_TZ   = 'Asia/Singapore';
@@ -591,7 +592,10 @@ async function sbRequest(table, method, body, params, options = {}) {
   });
   if (!res.ok) {
     const t = await res.text();
-    throw new Error(`Supabase ${res.status}: ${t.slice(0, 200)}`);
+    const error = new Error(`Supabase ${res.status}: ${t.slice(0, 200)}`);
+    error.status = res.status;
+    error.terminal = res.status === 423 || /SESSION_LOCKED|session is locked/i.test(t);
+    throw error;
   }
   if (res.status === 204) return null;
   const contentType = res.headers.get('content-type') || '';
@@ -723,6 +727,12 @@ async function flushReliabilityOutbox() {
           }));
         }
       } catch (error) {
+        if (isSessionLockedError(error)) {
+          // A class lock is permanent. Drop stale queued data instead of
+          // retrying it after the instructor has ended data collection.
+          await outboxDelete(item.outbox_id);
+          continue;
+        }
         const attempts = Number(item.attempts || 0) + 1;
         const retryDelayMs = Math.min(300_000, 2_000 * (2 ** Math.min(attempts - 1, 7)));
         await outboxPut({
@@ -818,8 +828,23 @@ async function participantRequest(action, payload = {}, token = participantSessi
     body: JSON.stringify({ action, ...payload }),
   });
   const response = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(response?.error || `Participant data API ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(response?.error || `Participant data API ${res.status}`);
+    error.status = res.status;
+    error.code = response?.code || '';
+    error.terminal = res.status === 423 || response?.code === 'SESSION_LOCKED';
+    throw error;
+  }
   return response;
+}
+
+function isSessionLockedError(error) {
+  return Boolean(
+    error?.terminal ||
+    error?.status === 423 ||
+    error?.code === 'SESSION_LOCKED' ||
+    /SESSION_LOCKED|session is locked|class has ended/i.test(String(error?.message || error || ''))
+  );
 }
 
 function restorePredictionHistory(rows) {
@@ -863,6 +888,7 @@ function normalizeCohortRow(row) {
     activity_type: row.activity_type,
     type: row.activity_type,
     description: row.task_description || '',
+    active: row.active !== false,
   };
 }
 
@@ -960,6 +986,7 @@ async function savePauseReflectionAOIWithRetry(metric, maxAttempts = 3) {
       return;
     } catch (error) {
       lastError = error;
+      if (isSessionLockedError(error)) break;
       if (attempt < maxAttempts) {
         await new Promise(resolve => window.setTimeout(resolve, 400 * (2 ** (attempt - 1))));
       }
@@ -1071,6 +1098,10 @@ async function createCohortCredential(group) {
   return adminRequest('create_cohort', { cohort: group });
 }
 
+async function lockCohortSessions(cohortId) {
+  return adminRequest('lock_cohort', { cohort_id: cohortId });
+}
+
 async function getManualOverrideCount(sessionUuid, cohortId, userId) {
   if (!sessionUuid) return 0;
   const filters = {
@@ -1123,6 +1154,8 @@ async function fetchAdminSessionOverview() {
       cohort_id: row.cohort_id || 'unassigned',
       activity_type: row.activity_type || '',
       participant_id: row.participant_id || '',
+      status: row.status || 'active',
+      locked_at: row.locked_at || null,
     };
   }
 
@@ -1967,6 +2000,7 @@ function App() {
   const [adminInfoMsg, setAdminInfoMsg] = useState('');
   const [adminError,   setAdminError]   = useState('');
   const [adminLoading, setAdminLoading] = useState(false);
+  const [lockingCohortId, setLockingCohortId] = useState(null);
   const [adminSessions, setAdminSessions] = useState([]);
   const [selectedAdminCohortId, setSelectedAdminCohortId] = useState(null);
   const [adminTextModal, setAdminTextModal] = useState(null);
@@ -2013,6 +2047,7 @@ function App() {
   });
   const throttleRef  = useRef(0);
   const processingGenerationRef = useRef(0);
+  const sessionLockedRef = useRef(false);
   const runningRef   = useRef(false);
   const pausedRef    = useRef(false);
   const rafRef       = useRef(null);
@@ -2170,6 +2205,27 @@ function App() {
     }
   }, [newCohortId, newActivityType, newTaskDescription, refreshSessionGroups, cohortIds]);
 
+  const handleLockCohort = useCallback(async (cohortId) => {
+    const confirmed = window.confirm(
+      `End class "${cohortId}"? This permanently blocks new logins and all future data writes for its participant sessions.`,
+    );
+    if (!confirmed) return;
+    try {
+      setAdminError('');
+      setAdminInfoMsg('');
+      setLockingCohortId(cohortId);
+      const result = await lockCohortSessions(cohortId);
+      await Promise.all([refreshSessionGroups(), refreshAdminOverview()]);
+      setAdminInfoMsg(
+        `Class ${cohortId} is locked. ${Number(result?.locked_sessions) || 0} active participant session(s) were ended.`,
+      );
+    } catch (error) {
+      setAdminError(`Could not lock class ${cohortId}: ${error?.message || String(error)}`);
+    } finally {
+      setLockingCohortId(null);
+    }
+  }, [refreshSessionGroups, refreshAdminOverview]);
+
   const handleEnterWithAccessCode = useCallback(async () => {
     const uid = (userId || '').trim();
     const enteredAccessCode = (cohortAccessCodeInput || '').trim();
@@ -2226,6 +2282,7 @@ function App() {
     const group = normalizeCohortRow(loginResult.cohort);
     const resumedHistory = restorePredictionHistory(loginResult.predictions);
     const activeSessionId = loginResult.session.session_id;
+    sessionLockedRef.current = false;
     participantSessionToken = loginResult.token;
     adminSessionToken = '';
     setSessionId(activeSessionId);
@@ -2401,6 +2458,7 @@ function App() {
             return;
           } catch (error) {
             lastError = error;
+            if (isSessionLockedError(error)) return;
             if (attempt < 3) {
               await new Promise(resolve => window.setTimeout(resolve, 500 * (2 ** (attempt - 1))));
             }
@@ -2409,6 +2467,7 @@ function App() {
         throw lastError || new Error('Raw blendshape batch upload failed.');
       })
       .catch(error => {
+        if (isSessionLockedError(error)) return;
         console.error('[Supabase] raw blendshape batch:', error);
         setLastError('[Supabase] raw blendshape batch: ' + String(error));
       });
@@ -2699,6 +2758,7 @@ function App() {
       ended_by: endedBy,
     };
     savePauseReflectionAOIWithRetry(metric).catch(error => {
+      if (isSessionLockedError(error)) return;
       setLastError('[Supabase] save Pause and Reflect AOI: ' + String(error));
     });
     return metric;
@@ -2795,6 +2855,46 @@ function App() {
     closeMonitorWindow();
   }, [activeCohort, closeMonitorWindow, finalizePauseAOI, queueRawBlendshapeBatch]);
 
+  const handleSessionLocked = useCallback(() => {
+    if (sessionLockedRef.current) return;
+    sessionLockedRef.current = true;
+
+    // Do not flush, log, or finalize AOI here: the instructor has explicitly
+    // ended collection. The database also rejects every late/in-flight write.
+    runningRef.current = false;
+    pausedRef.current = false;
+    processingGenerationRef.current += 1;
+    if (rafRef.current) cancelFrameRef.current(rafRef.current);
+    rafRef.current = null;
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    if (mainVideoRef.current) mainVideoRef.current.srcObject = null;
+    frameBuffer.current = [];
+    rawBlendshapeBatchRef.current = [];
+    rawBatchStartedAtRef.current = null;
+    gazeBuffer.current = [];
+    currentGazeAOIRef.current = null;
+    pauseAOIRef.current = emptyPauseAOITracker();
+    participantSessionToken = '';
+    sessionRef.current = null;
+
+    setRunning(false);
+    setPaused(false);
+    setCameraReady(false);
+    setNoFace(false);
+    setBufferLen(0);
+    setProcessingStatus('Stopped');
+    setCurrentPauseAOIPercent(null);
+    setSessionId(null);
+    setActiveCohort(null);
+    setResumePending(false);
+    setResumeNotice('');
+    setAuthReady(false);
+    setAuthError('This class has ended. Data collection is locked.');
+    closeMonitorWindow();
+  }, [closeMonitorWindow]);
+
   pauseActionRef.current = handlePauseToggle;
   stopActionRef.current = handleStop;
   monitorClosedActionRef.current = () => {
@@ -2833,6 +2933,34 @@ function App() {
     sessionRef.current = null;
     setActiveCohort(null);
   }, [handleStop]);
+
+  useEffect(() => {
+    if (!authReady || isAdminMode || !participantSessionToken) return undefined;
+    const token = participantSessionToken;
+    let cancelled = false;
+    let timerId = null;
+
+    const checkStatus = async () => {
+      try {
+        const status = await participantRequest('session_status', {}, token);
+        if (!cancelled && status?.active === false) handleSessionLocked();
+      } catch (error) {
+        if (!cancelled && isSessionLockedError(error)) handleSessionLocked();
+      } finally {
+        if (!cancelled && !sessionLockedRef.current) {
+          // Jitter keeps 50 classroom browsers from polling Supabase together.
+          const jitterMs = Math.floor(Math.random() * 2_000);
+          timerId = window.setTimeout(checkStatus, SESSION_STATUS_POLL_MS + jitterMs);
+        }
+      }
+    };
+
+    timerId = window.setTimeout(checkStatus, Math.floor(Math.random() * 1_000));
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, [authReady, isAdminMode, handleSessionLocked]);
 
   const handleRefreshAdminData = useCallback(async () => {
     await Promise.all([refreshAdminOverview(), refreshSessionGroups()]);
@@ -2955,6 +3083,7 @@ function App() {
         aoi_total_ms_sum: 0,
         created_at: g.created_at,
         access_code: g.access_code,
+        active: g.active !== false,
       };
     }
     for (const row of adminSessions) {
@@ -3110,6 +3239,8 @@ function App() {
                   e('th', { style:{ minWidth:'110px', width:'110px', maxWidth:'110px' } }, 'Total Edits Made'),
                   e('th', null, 'Average % AOI'),
                   e('th', null, 'Total Participants'),
+                  e('th', null, 'Status'),
+                  e('th', null, 'Class Control'),
                 )
               ),
               e('tbody', null,
@@ -3130,8 +3261,19 @@ function App() {
                     e('td', { style:{ minWidth:'110px', width:'110px', maxWidth:'110px' } }, String(g.edits || 0)),
                     e('td', null, g.aoi_total_ms_sum ? `${(g.aoi_inside_ms_sum / g.aoi_total_ms_sum * 100).toFixed(1)}%` : '-'),
                     e('td', null, String(g.sessions || 0)),
+                    e('td', null, g.active ? 'Active' : 'Locked'),
+                    e('td', null,
+                      e('button', {
+                        type:'button',
+                        className:'btn-danger',
+                        style:{padding:'0.45rem 0.7rem', whiteSpace:'nowrap'},
+                        onClick:() => handleLockCohort(g.id),
+                        disabled:!g.active || lockingCohortId === g.id,
+                        title:g.active ? 'Permanently end data collection for this class' : 'This class is already locked',
+                      }, !g.active ? 'Locked' : lockingCohortId === g.id ? 'Locking...' : 'End Class')
+                    ),
                   ))
-                  : e('tr', null, e('td', { colSpan:8, style:{color:'var(--muted)'} }, 'No cohorts created yet.'))
+                  : e('tr', null, e('td', { colSpan:10, style:{color:'var(--muted)'} }, 'No cohorts created yet.'))
               )
             )
           )

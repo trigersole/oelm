@@ -173,9 +173,10 @@ Deno.serve(async request => {
 
     const cohortId = String(cohort.cohort_id);
     const { data: previousSessions, error: sessionLookupError } = await db.from("sessions")
-      .select("id,session_id,label,created_at,cohort_id,activity_type,participant_id")
+      .select("id,session_id,label,created_at,cohort_id,activity_type,participant_id,status,locked_at,locked_by")
       .eq("cohort_id", cohortId)
       .eq("participant_id", participantId)
+      .eq("status", "active")
       .order("created_at", { ascending: false })
       .limit(1);
     if (sessionLookupError) return json({ error: sessionLookupError.message }, 500, origin);
@@ -191,8 +192,14 @@ Deno.serve(async request => {
         cohort_id: cohortId,
         activity_type: cohort.activity_type || "without_edit",
         created_at: new Date().toISOString(),
-      }).select("id,session_id,label,created_at,cohort_id,activity_type,participant_id").single();
-      if (createError) return json({ error: createError.message }, 500, origin);
+        status: "active",
+      }).select("id,session_id,label,created_at,cohort_id,activity_type,participant_id,status,locked_at,locked_by").single();
+      if (createError) {
+        if (/SESSION_LOCKED/i.test(createError.message)) {
+          return json({ error: "This class has ended and no longer accepts participants.", code: "SESSION_LOCKED" }, 423, origin);
+        }
+        return json({ error: createError.message }, 500, origin);
+      }
       session = created;
     }
 
@@ -248,11 +255,38 @@ Deno.serve(async request => {
     }, 200, origin);
   }
 
-  if (input?.action === "save_blendshape_batch") {
+  if (input?.action === "session_status" || input?.action === "save_blendshape_batch") {
     const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
     const participant = await readSignedToken(bearer, sessionSecret);
     if (participant?.role !== "oelm-participant") {
       return json({ error: "Participant session is invalid or expired." }, 401, origin);
+    }
+
+    const { data: currentSession, error: currentSessionError } = await db.from("sessions")
+      .select("session_id,status,locked_at")
+      .eq("session_id", participant.session_id)
+      .eq("participant_id", participant.participant_id)
+      .eq("cohort_id", participant.cohort_id)
+      .maybeSingle();
+    if (currentSessionError) return json({ error: currentSessionError.message }, 500, origin);
+    if (!currentSession) {
+      return json({ error: "Participant session was not found.", code: "SESSION_NOT_FOUND" }, 404, origin);
+    }
+
+    const sessionActive = currentSession.status === "active";
+    if (input?.action === "session_status") {
+      return json({
+        active: sessionActive,
+        status: currentSession.status || "locked",
+        locked_at: currentSession.locked_at || null,
+      }, 200, origin);
+    }
+    if (!sessionActive) {
+      return json({
+        error: "This class has ended and the session is locked.",
+        code: "SESSION_LOCKED",
+        locked_at: currentSession.locked_at || null,
+      }, 423, origin);
     }
 
     const values = input?.values;
@@ -306,6 +340,21 @@ Deno.serve(async request => {
     return json({ error: "Administrator session is invalid or expired." }, 401, origin);
   }
 
+  if (input?.action === "lock_cohort") {
+    const cohortId = String(input?.cohort_id || "").trim();
+    if (!cohortId) return json({ error: "Cohort ID is required." }, 400, origin);
+    const { data, error } = await db.rpc("lock_oelm_cohort", {
+      p_cohort_id: cohortId,
+      p_locked_by: "administrator",
+    });
+    if (error) return json({ error: error.message }, 500, origin);
+    return json({
+      cohort_id: cohortId,
+      active: false,
+      locked_sessions: Number(data) || 0,
+    }, 200, origin);
+  }
+
   if (input?.action === "list_cohorts") {
     const { data, error } = await db.from("login_credentials")
       .select("cohort_id,access_code,created_at,activity_type,task_description,active")
@@ -334,7 +383,7 @@ Deno.serve(async request => {
 
   if (input?.action === "overview") {
     const [sessions, predictions, overrides, aoi] = await Promise.all([
-      db.from("sessions").select("id,session_id,label,created_at,cohort_id,activity_type,participant_id").order("created_at", { ascending: false }).limit(500),
+      db.from("sessions").select("id,session_id,label,created_at,cohort_id,activity_type,participant_id,status,locked_at,locked_by").order("created_at", { ascending: false }).limit(500),
       db.from("emotion_predictions").select("session_id,participant_id,cohort_id,activity_type,pause_and_reflect_number,predicted_at").eq("model_version", ACTIVE_MODEL_VERSION).order("predicted_at", { ascending: false }).limit(20000),
       db.from("manual_overrides").select("session_id,cohort_id,participant_id,pause_and_reflect_number,bucket_label,label_col,is_minor_change,is_major_change,words_edited,justification,overridden_at,status").order("overridden_at", { ascending: false }).limit(10000),
       db.from("pause_reflection_aoi").select("session_id,cohort_id,participant_id,pause_and_reflect_number,total_pause_ms,inside_aoi_ms,aoi_percent,valid_gaze_frames,total_gaze_frames,paused_at,resumed_at").order("paused_at", { ascending: false }).limit(10000),

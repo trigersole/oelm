@@ -22,6 +22,11 @@ request IDs, backend-only delivery fields, and the
 this migration, new predictions remain in the browser outbox until the schema
 is available.
 
+Finally, run `docs/supabase-session-locking.sql`. It adds the irreversible
+instructor class lock, disables future participant logins, and installs
+database triggers that reject late, in-flight, or queued writes from locked
+sessions. Deploy the updated Edge Function only after this migration succeeds.
+
 ## 2. Configure the administrator Edge Function
 
 Deploy `supabase/functions/oelm-admin/index.ts` as the `oelm-admin` function with
