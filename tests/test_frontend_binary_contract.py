@@ -18,7 +18,7 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertNotIn("['Very Low','Low','High','Very High']", self.source)
 
     def test_frontend_records_binary_model_version(self) -> None:
-        self.assertIn("const MODEL_VERSION  = 'xgb-binary-v1';", self.source)
+        self.assertIn("const MODEL_VERSION  = 'xgb260-static-seed1729-v1';", self.source)
 
     def test_only_binary_predictions_reach_supabase(self) -> None:
         self.assertIn("function isBinaryPrediction(prediction)", self.source)
@@ -27,6 +27,22 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertNotIn("${API_BASE_URL}/api/predict", self.source)
         self.assertIn("table: 'emotion_predictions'", self.source)
         self.assertIn("params: { on_conflict: 'request_id' }", self.source)
+        self.assertIn("model_version: prediction.model_version || MODEL_VERSION", self.source)
+
+    def test_frontend_uses_xgb260_static_aggregation(self) -> None:
+        aggregation = (
+            ROOT_DIR / "src" / "data" / "featureAggregation.js"
+        ).read_text(encoding="utf-8")
+        order = (ROOT_DIR / "src" / "data" / "featureOrder.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("aggregateStaticWindow(frames, blendshapeNames)", aggregation)
+        self.assertIn("['mean', 'std', 'min', 'max', 'median']", aggregation)
+        self.assertIn("out[cat.categoryName] = Number(cat.score);", self.source)
+        self.assertNotIn("cat.score.toFixed", self.source)
+        self.assertNotIn("_skew", order)
+        self.assertNotIn("_kurt", order)
+        self.assertEqual(order.count('"'), 520)
 
     def test_prediction_delivery_is_timeout_bounded_and_idempotent(self) -> None:
         required_fragments = [

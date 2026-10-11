@@ -33,10 +33,13 @@ def request_json(url: str, payload: dict | None = None) -> dict:
 
 
 def validate_prediction(payload: dict) -> None:
-    if set(payload) != LABELS:
+    if payload.get("model_version") != "xgb260-static-seed1729-v1":
+        raise AssertionError(f"Unexpected model version: {payload.get('model_version')}")
+    if not LABELS.issubset(payload):
         raise AssertionError(f"Expected labels {sorted(LABELS)}, found {sorted(payload)}")
 
-    for affective_label, prediction in payload.items():
+    for affective_label in LABELS:
+        prediction = payload[affective_label]
         label = prediction.get("label")
         if label not in LEVELS:
             raise AssertionError(f"{affective_label}: expected binary label, found {label}")
@@ -64,7 +67,7 @@ def main() -> None:
     binary_health = health.get("binary", health)
     if binary_health.get("levels") != ["Low", "High"]:
         raise AssertionError(f"Unexpected binary levels: {binary_health.get('levels')}")
-    if health.get("feature_count") != 364:
+    if health.get("feature_count") != 260:
         raise AssertionError(f"Unexpected feature count: {health.get('feature_count')}")
 
     with (ROOT_DIR / "binary_models" / "feature_order.json").open(

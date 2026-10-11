@@ -10,6 +10,7 @@ Copy-Item -LiteralPath (Join-Path $sourceRoot 'app.js') -Destination (Join-Path 
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'styles.css') -Destination (Join-Path $distRoot 'styles.css') -Force
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'config.js') -Destination (Join-Path $distRoot 'config.js') -Force
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'data\featureOrder.js') -Destination (Join-Path $distRoot 'data\featureOrder.js') -Force
+Copy-Item -LiteralPath (Join-Path $sourceRoot 'data\featureAggregation.js') -Destination (Join-Path $distRoot 'data\featureAggregation.js') -Force
 
 $localConfig = Join-Path $distRoot 'config.local.js'
 if (Test-Path -LiteralPath $localConfig) {

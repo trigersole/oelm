@@ -66,9 +66,9 @@ Expected health values include:
 ```json
 {
   "status": "ok",
-  "model_version": "xgb-binary-v1",
+  "model_version": "xgb260-static-seed1729-v1",
   "levels": ["Low", "High"],
-  "feature_count": 364
+  "feature_count": 260
 }
 ```
 

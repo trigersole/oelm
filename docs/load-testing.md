@@ -7,7 +7,7 @@ The browser creates two different traffic patterns:
 
 For 50 students, steady traffic is approximately 5 Hugging Face requests/second and 5 Supabase prediction inserts/second. The startup burst can be 50 requests arriving almost together, so test both the burst and a longer steady phase.
 
-The current prediction payload is about 11.2 KB because `emotion_predictions.raw_data` contains all 364 aggregate features. At 50 students and one prediction every 10 seconds, a one-hour class produces about 18,000 rows and sends roughly 200 MB of prediction JSON to Supabase before database compression and index overhead. During a longer test, also watch database size growth; request latency alone is not enough.
+The XGB-260 prediction payload stores 260 aggregate features in `emotion_predictions.raw_data`. At 50 students and one prediction every 10 seconds, a one-hour class produces about 18,000 rows. During a longer test, watch database size growth as well as request latency. The JSON payload is smaller than the earlier 364-feature measurements recorded under `load-test-results/`, so those historical results are conservative for payload size but are not a substitute for a fresh deployment load test.
 
 ## 1. Hugging Face test (safe, no database writes)
 

@@ -1,0 +1,8 @@
+{
+  "name": "oelm-browser-contract-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:features": "node --test tests/feature_aggregation.test.mjs"
+  }
+}

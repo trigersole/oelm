@@ -19,7 +19,7 @@ intensity levels into a binary target for each affective state:
 | `1 — High` | High + Very High |
 
 The browser processes camera frames locally with MediaPipe, aggregates 52 face
-blendshapes into 364 statistics every 10 seconds, and sends only those statistics
+blendshapes into 260 static statistics every 10 seconds, and sends only those statistics
 to the FastAPI model service. Four directly trained binary XGBoost heads predict
 Boredom, Engagement, Confusion, and Frustration.
 
@@ -95,18 +95,21 @@ Endpoints:
 - `GET /` — service links
 - `GET /health` — model readiness and feature count
 - `GET /model-info` — mapping, seed, and validation thresholds
-- `POST /predict` — binary inference from `agg_features`
+- `POST /predict-binary` — production binary inference from `agg_features`
+- `POST /predict` — compatibility alias for the same inference handler
 - `GET /docs` — interactive OpenAPI documentation
 
 Example response fragment:
 
 ```json
 {
+  "model_version": "xgb260-static-seed1729-v1",
+  "feature_schema": "52-blendshapes-x-mean-std-min-max-median",
   "Boredom": {
     "label": 0,
     "level": "Low",
     "probabilities": {"0": 0.72, "1": 0.28},
-    "threshold": 0.47
+    "threshold": 0.53
   }
 }
 ```

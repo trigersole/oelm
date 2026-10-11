@@ -1,22 +1,39 @@
 {
-  "model_version": "xgb-binary-v1",
-  "model_type": "direct binary XGBoost",
+  "model_version": "xgb260-static-seed1729-v1",
+  "model_type": "direct binary XGBoost with static window statistics",
   "training_seed": 1729,
+  "feature_count": 260,
+  "feature_schema": "52-blendshapes-x-mean-std-min-max-median",
   "source_level_mapping": {
     "Low": ["Very Low", "Low"],
     "High": ["High", "Very High"]
   },
   "decision_thresholds": {
-    "Boredom": 0.4699999988079071,
-    "Engagement": 0.46000000834465027,
-    "Confusion": 0.49000000953674316,
-    "Frustration": 0.49000000953674316
+    "Boredom": 0.5299999999999999,
+    "Engagement": 0.73,
+    "Confusion": 0.5399999999999999,
+    "Frustration": 0.22999999999999998
   },
   "best_iterations": {
-    "Boredom": 317,
-    "Engagement": 44,
-    "Confusion": 118,
-    "Frustration": 77
+    "Boredom": 185,
+    "Engagement": 43,
+    "Confusion": 92,
+    "Frustration": 18
   },
-  "selection": "Seed selected by mean validation macro-F1; the test split was not used for checkpoint selection."
+  "boosting_rounds": {
+    "Boredom": 186,
+    "Engagement": 44,
+    "Confusion": 93,
+    "Frustration": 19
+  },
+  "validation_macro_f1": 0.5823844672820153,
+  "artifact_sha256": {
+    "model_binary_Boredom.ubj": "c46c2900f0fcd59eeca5d13b882ee9238da6b2f4637bd3a2de38a9763cd44a14",
+    "model_binary_Engagement.ubj": "11c77f7d23e984148a218b702dfd8df09acb4ddfc31075d4e30cf6df2041a397",
+    "model_binary_Confusion.ubj": "abc9419c661ebcb32a1de89ac0d3dad267be8acd8e72cb99b0088f593cf76154",
+    "model_binary_Frustration.ubj": "d33fcb03e42713d94473d3cec401a5bfb4c5d160d4e8bce20b6ab18b7ea197ea",
+    "feature_order.json": "4e667ca270b149eb8f0383dc8d84a1ab0b6cbf2059554b34763ed1192622606c",
+    "training_metrics.json": "67b437881110c00ac1518a2014dd03e929280cdda1ced22b6f8bdb34420163e9"
+  },
+  "selection": "Seed 1729 selected over seed 42 by mean validation macro-F1; the test split was not used for checkpoint selection."
 }

@@ -23,7 +23,8 @@ from pydantic import BaseModel
 
 LABEL_COLS = ["Boredom", "Engagement", "Confusion", "Frustration"]
 LEVEL_NAMES = ["Low", "High"]
-MODEL_VERSION = "xgb-binary-v1"
+MODEL_VERSION = "xgb260-static-seed1729-v1"
+FEATURE_SCHEMA = "52-blendshapes-x-mean-std-min-max-median"
 
 ROOT_DIR = Path(__file__).resolve().parent
 MODEL_DIR = ROOT_DIR / "binary_models"
@@ -40,6 +41,12 @@ def load_json(path: Path) -> dict | list:
 
 FEATURE_ORDER = list(load_json(FEATURE_ORDER_PATH))
 MODEL_CONFIG = dict(load_json(MODEL_CONFIG_PATH))
+if MODEL_CONFIG.get("model_version") != MODEL_VERSION:
+    raise RuntimeError("Model config version does not match the service version")
+if len(FEATURE_ORDER) != int(MODEL_CONFIG.get("feature_count", -1)):
+    raise RuntimeError("Feature order length does not match the model config")
+if len(FEATURE_ORDER) != len(set(FEATURE_ORDER)):
+    raise RuntimeError("Feature order contains duplicate names")
 DECISION_THRESHOLDS = {
     label: float(MODEL_CONFIG["decision_thresholds"][label]) for label in LABEL_COLS
 }
@@ -61,7 +68,20 @@ def load_models() -> None:
         if not path.exists():
             raise FileNotFoundError(f"Binary model file not found: {path}")
         booster = xgb.Booster()
-        booster.load_model(path)
+        # Loading bytes avoids Windows path canonicalization failures in some
+        # XGBoost builds while preserving the exact UBJ artifact.
+        booster.load_model(bytearray(path.read_bytes()))
+        if booster.num_features() != len(FEATURE_ORDER):
+            raise RuntimeError(
+                f"{label} expects {booster.num_features()} features; "
+                f"the deployment schema contains {len(FEATURE_ORDER)}"
+            )
+        expected_rounds = BEST_ITERATIONS[label] + 1
+        if booster.num_boosted_rounds() != expected_rounds:
+            raise RuntimeError(
+                f"{label} has {booster.num_boosted_rounds()} rounds; "
+                f"the deployment config expects {expected_rounds}"
+            )
         models[label] = booster
     print(f"[OELM] Loaded binary models: {list(models)}")
 
@@ -87,7 +107,7 @@ async def startup_event() -> None:
 
 
 class PredictRequest(BaseModel):
-    # The browser sends seven aggregate statistics for each of 52 blendshapes.
+    # The browser sends five aggregate statistics for each of 52 blendshapes.
     agg_features: dict[str, float]
 
 
@@ -99,6 +119,11 @@ class LabelPrediction(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    class Config:
+        protected_namespaces = ()
+
+    model_version: str
+    feature_schema: str
     Boredom: LabelPrediction
     Engagement: LabelPrediction
     Confusion: LabelPrediction
@@ -124,6 +149,8 @@ def health() -> dict:
         "model_version": MODEL_VERSION,
         "levels": LEVEL_NAMES,
         "feature_count": len(FEATURE_ORDER),
+        "feature_schema": FEATURE_SCHEMA,
+        "training_seed": MODEL_CONFIG["training_seed"],
         "models_loaded": list(models.keys()),
     }
 
@@ -140,6 +167,7 @@ def model_info() -> dict:
             "High": ["High", "Very High"],
         },
         "feature_count": len(FEATURE_ORDER),
+        "feature_schema": FEATURE_SCHEMA,
         "decision_thresholds": DECISION_THRESHOLDS,
         "best_iterations": BEST_ITERATIONS,
         "training_seed": MODEL_CONFIG["training_seed"],
@@ -168,7 +196,8 @@ def ordered_feature_row(agg_features: dict[str, float]) -> np.ndarray:
     )
 
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post("/predict-binary", response_model=PredictResponse)
+@app.post("/predict", response_model=PredictResponse, include_in_schema=False)
 def predict(body: PredictRequest) -> dict:
     if not models:
         load_models()
@@ -176,7 +205,10 @@ def predict(body: PredictRequest) -> dict:
     data_matrix = xgb.DMatrix(
         ordered_feature_row(body.agg_features), feature_names=FEATURE_ORDER
     )
-    result: dict[str, dict] = {}
+    result: dict[str, object] = {
+        "model_version": MODEL_VERSION,
+        "feature_schema": FEATURE_SCHEMA,
+    }
 
     for label in LABEL_COLS:
         output = np.asarray(

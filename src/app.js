@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 import { FEATURE_ORDER } from './data/featureOrder.js';
+import { aggregateStaticWindow } from './data/featureAggregation.js';
 
 const API_REQUEST_TIMEOUT_MS = 5_000;
 const API_RETRY_DELAY_MS = 250;
@@ -98,7 +99,7 @@ const WINDOW_SECONDS = 10;
 const WINDOW_FRAMES  = CAPTURE_FPS * WINDOW_SECONDS;  // 50
 const RAW_BLENDSHAPE_BATCH_SECONDS = 30;
 const RAW_BLENDSHAPE_BATCH_FRAMES = CAPTURE_FPS * RAW_BLENDSHAPE_BATCH_SECONDS;
-const MODEL_VERSION  = 'xgb-binary-v1';
+const MODEL_VERSION  = 'xgb260-static-seed1729-v1';
 const SINGAPORE_TZ   = 'Asia/Singapore';
 const GAZE_AOI_CONFIG = {
   name: 'Whole screen AOI',
@@ -286,44 +287,21 @@ function extractBlendshapes(result) {
   const cats = result.faceBlendshapes[0].categories;
   const out = {};
   for (const cat of cats) {
-    out[cat.categoryName] = parseFloat(cat.score.toFixed(5));
+    // Preserve the MediaPipe score used by the training-time aggregator.
+    out[cat.categoryName] = Number(cat.score);
   }
   return out;
 }
 
 // ===============================================================
-// FEATURE_ORDER - 364 keys from feature_order.pkl
+// FEATURE_ORDER - 260 XGB-260 static features in training order
 // ===============================================================
 
 // ===============================================================
 // aggregateWindow()
 // ===============================================================
 function aggregateWindow(frames) {
-  if (!frames.length) return null;
-  const result = {};
-  for (const name of BLENDSHAPE_NAMES) {
-    const vals = frames.map(f => f[name] ?? 0);
-    const n = vals.length;
-    const mean = vals.reduce((s, v) => s + v, 0) / n;
-    const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
-    const std = Math.sqrt(variance);
-    let min = vals[0], max = vals[0];
-    for (const v of vals) { if (v < min) min = v; if (v > max) max = v; }
-    const sorted = [...vals].sort((a, b) => a - b);
-    const mid = n % 2 === 0
-      ? (sorted[n / 2 - 1] + sorted[n / 2]) / 2
-      : sorted[Math.floor(n / 2)];
-    const skew = std === 0 ? 0 : vals.reduce((s, v) => s + ((v - mean) / std) ** 3, 0) / n;
-    const kurt = std === 0 ? 0 : (vals.reduce((s, v) => s + ((v - mean) / std) ** 4, 0) / n) - 3;
-    result[`${name}_mean`]   = parseFloat(mean.toFixed(5));
-    result[`${name}_std`]    = parseFloat(std.toFixed(5));
-    result[`${name}_min`]    = parseFloat(min.toFixed(5));
-    result[`${name}_max`]    = parseFloat(max.toFixed(5));
-    result[`${name}_median`] = parseFloat(mid.toFixed(5));
-    result[`${name}_skew`]   = parseFloat(skew.toFixed(5));
-    result[`${name}_kurt`]   = parseFloat(kurt.toFixed(5));
-  }
-  return result;
+  return aggregateStaticWindow(frames, BLENDSHAPE_NAMES);
 }
 
 function averageLandmark(landmarks, indices) {
@@ -932,7 +910,7 @@ async function insertPrediction(
     label: JSON.stringify(labelsFlat),
     confidence: parseFloat(maxConf.toFixed(5)),
     probabilities: probsFlat,
-    model_version: MODEL_VERSION,
+    model_version: prediction.model_version || MODEL_VERSION,
     raw_data: aggFeatures ?? null,
     active_elapsed_ms: Number.isFinite(timing.active_elapsed_ms) ? Math.round(timing.active_elapsed_ms) : null,
     segment_id: Number.isFinite(timing.segment_id) ? timing.segment_id : pauseAndReflectNumber ?? null,

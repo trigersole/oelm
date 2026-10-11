@@ -16,10 +16,18 @@ class SessionRecoveryContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def test_login_is_scoped_to_participant_and_cohort(self) -> None:
+        self.assertIn(
+            'const ACTIVE_MODEL_VERSION = "xgb260-static-seed1729-v1";',
+            self.edge,
+        )
         self.assertIn('input?.action === "participant_login"', self.edge)
         self.assertIn('.eq("cohort_id", cohortId)', self.edge)
         self.assertIn('.eq("participant_id", participantId)', self.edge)
         self.assertIn('role: "oelm-participant"', self.edge)
+        self.assertGreaterEqual(
+            self.edge.count('.eq("model_version", ACTIVE_MODEL_VERSION)'),
+            2,
+        )
 
     def test_raw_batches_require_participant_token(self) -> None:
         self.assertIn('input?.action === "save_blendshape_batch"', self.edge)

@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const encoder = new TextEncoder();
+const ACTIVE_MODEL_VERSION = "xgb260-static-seed1729-v1";
 
 function json(body: unknown, status = 200, origin = "") {
   return new Response(JSON.stringify(body), {
@@ -202,7 +203,7 @@ Deno.serve(async request => {
         const page = await db.from("emotion_predictions")
           .select(columns)
           .eq("session_id", sessionId)
-          .eq("model_version", "xgb-binary-v1")
+          .eq("model_version", ACTIVE_MODEL_VERSION)
           .order("predicted_at", { ascending: true })
           .range(offset, offset + 999);
         if (page.error) return { data: null, error: page.error };
@@ -334,7 +335,7 @@ Deno.serve(async request => {
   if (input?.action === "overview") {
     const [sessions, predictions, overrides, aoi] = await Promise.all([
       db.from("sessions").select("id,session_id,label,created_at,cohort_id,activity_type,participant_id").order("created_at", { ascending: false }).limit(500),
-      db.from("emotion_predictions").select("session_id,participant_id,cohort_id,activity_type,pause_and_reflect_number,predicted_at").order("predicted_at", { ascending: false }).limit(20000),
+      db.from("emotion_predictions").select("session_id,participant_id,cohort_id,activity_type,pause_and_reflect_number,predicted_at").eq("model_version", ACTIVE_MODEL_VERSION).order("predicted_at", { ascending: false }).limit(20000),
       db.from("manual_overrides").select("session_id,cohort_id,participant_id,pause_and_reflect_number,bucket_label,label_col,is_minor_change,is_major_change,words_edited,justification,overridden_at,status").order("overridden_at", { ascending: false }).limit(10000),
       db.from("pause_reflection_aoi").select("session_id,cohort_id,participant_id,pause_and_reflect_number,total_pause_ms,inside_aoi_ms,aoi_percent,valid_gaze_frames,total_gaze_frames,paused_at,resumed_at").order("paused_at", { ascending: false }).limit(10000),
     ]);
