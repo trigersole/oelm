@@ -37,6 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = Path(__file__).resolve().parents[1]
 FEATURE_ORDER_FILE = ROOT / "src" / "data" / "featureOrder.js"
 LABELS = ("Boredom", "Engagement", "Confusion", "Frustration")
+MODEL_VERSION = "xgb260-static-seed1729-v1"
+FEATURE_SCHEMA = "52-blendshapes-x-mean-std-min-max-median"
 
 
 @dataclass(frozen=True)
@@ -155,10 +157,14 @@ def hf_predict(
 ) -> dict[str, Any] | None:
     ok, response, _ = request_json(
         operation,
-        f"{hf_url.rstrip('/')}/predict",
+        f"{hf_url.rstrip('/')}/predict-binary",
         results,
         method="POST",
-        payload={"agg_features": aggregate},
+        payload={
+            "model_version": MODEL_VERSION,
+            "feature_schema": FEATURE_SCHEMA,
+            "agg_features": aggregate,
+        },
         timeout=timeout,
     )
     if not ok or not isinstance(response, dict):

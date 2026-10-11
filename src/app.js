@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
-import { FEATURE_ORDER } from './data/featureOrder.js';
-import { aggregateStaticWindow } from './data/featureAggregation.js';
+import { FEATURE_ORDER } from './data/featureOrder.js?v=xgb260-static-seed1729-v1';
+import { aggregateStaticWindow } from './data/featureAggregation.js?v=xgb260-static-seed1729-v1';
 
 const API_REQUEST_TIMEOUT_MS = 5_000;
 const API_RETRY_DELAY_MS = 250;
@@ -100,6 +100,7 @@ const WINDOW_FRAMES  = CAPTURE_FPS * WINDOW_SECONDS;  // 50
 const RAW_BLENDSHAPE_BATCH_SECONDS = 30;
 const RAW_BLENDSHAPE_BATCH_FRAMES = CAPTURE_FPS * RAW_BLENDSHAPE_BATCH_SECONDS;
 const MODEL_VERSION  = 'xgb260-static-seed1729-v1';
+const FEATURE_SCHEMA = '52-blendshapes-x-mean-std-min-max-median';
 const SINGAPORE_TZ   = 'Asia/Singapore';
 const GAZE_AOI_CONFIG = {
   name: 'Whole screen AOI',
@@ -542,7 +543,11 @@ async function classifyWindow(aggregatedFeatures) {
     const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agg_features: orderedFeatures }),
+      body: JSON.stringify({
+        model_version: MODEL_VERSION,
+        feature_schema: FEATURE_SCHEMA,
+        agg_features: orderedFeatures,
+      }),
     });
     if (!res.ok) {
       const text = await res.text();

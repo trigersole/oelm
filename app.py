@@ -107,7 +107,12 @@ async def startup_event() -> None:
 
 
 class PredictRequest(BaseModel):
+    class Config:
+        protected_namespaces = ()
+
     # The browser sends five aggregate statistics for each of 52 blendshapes.
+    model_version: str
+    feature_schema: str
     agg_features: dict[str, float]
 
 
@@ -201,6 +206,16 @@ def ordered_feature_row(agg_features: dict[str, float]) -> np.ndarray:
 def predict(body: PredictRequest) -> dict:
     if not models:
         load_models()
+
+    if body.model_version != MODEL_VERSION or body.feature_schema != FEATURE_SCHEMA:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Prediction client/model contract mismatch",
+                "expected_model_version": MODEL_VERSION,
+                "expected_feature_schema": FEATURE_SCHEMA,
+            },
+        )
 
     data_matrix = xgb.DMatrix(
         ordered_feature_row(body.agg_features), feature_names=FEATURE_ORDER

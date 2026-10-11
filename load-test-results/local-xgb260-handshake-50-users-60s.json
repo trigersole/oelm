@@ -1,0 +1,57 @@
+{
+  "run_id": "20261011-174527",
+  "configuration": {
+    "users": 50,
+    "duration": 60.0,
+    "interval": 10.0,
+    "ramp_up": 0.0,
+    "hf_url": "http://127.0.0.1:7860",
+    "timeout": 20,
+    "supabase_mode": "off",
+    "cohort_id": "",
+    "run_id": "20261011-174527",
+    "steady_only": false,
+    "feature_count": 260
+  },
+  "wall_seconds": 60.469,
+  "operations": {
+    "hf_startup_predict": {
+      "requests": 50,
+      "successes": 50,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 0.827,
+      "latency_ms": {
+        "median": 249.79,
+        "p95": 359.5,
+        "p99": 368.39,
+        "max": 369.02
+      },
+      "statuses": {
+        "200": 50
+      },
+      "example_errors": []
+    },
+    "hf_steady_predict": {
+      "requests": 300,
+      "successes": 300,
+      "errors": 0,
+      "error_rate_percent": 0.0,
+      "requests_per_second": 4.961,
+      "latency_ms": {
+        "median": 41.45,
+        "p95": 109.23,
+        "p99": 147.11,
+        "max": 176.48
+      },
+      "statuses": {
+        "200": 300
+      },
+      "example_errors": []
+    }
+  },
+  "assessment": {
+    "passed": true,
+    "failures": []
+  }
+}

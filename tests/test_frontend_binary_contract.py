@@ -19,6 +19,9 @@ class FrontendBinaryContractTests(unittest.TestCase):
 
     def test_frontend_records_binary_model_version(self) -> None:
         self.assertIn("const MODEL_VERSION  = 'xgb260-static-seed1729-v1';", self.source)
+        self.assertIn("const FEATURE_SCHEMA = '52-blendshapes-x-mean-std-min-max-median';", self.source)
+        self.assertIn("model_version: MODEL_VERSION", self.source)
+        self.assertIn("feature_schema: FEATURE_SCHEMA", self.source)
 
     def test_only_binary_predictions_reach_supabase(self) -> None:
         self.assertIn("function isBinaryPrediction(prediction)", self.source)
@@ -28,6 +31,7 @@ class FrontendBinaryContractTests(unittest.TestCase):
         self.assertIn("table: 'emotion_predictions'", self.source)
         self.assertIn("params: { on_conflict: 'request_id' }", self.source)
         self.assertIn("model_version: prediction.model_version || MODEL_VERSION", self.source)
+        self.assertIn("app.js?v=xgb260-static-seed1729-v1", (ROOT_DIR / "index.html").read_text(encoding="utf-8"))
 
     def test_frontend_uses_xgb260_static_aggregation(self) -> None:
         aggregation = (

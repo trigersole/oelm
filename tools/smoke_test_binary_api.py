@@ -76,7 +76,12 @@ def main() -> None:
         feature_order = json.load(handle)
     features = {name: 0.0 for name in feature_order}
     prediction = request_json(
-        f"{base_url}/predict-binary", {"agg_features": features}
+        f"{base_url}/predict-binary",
+        {
+            "model_version": "xgb260-static-seed1729-v1",
+            "feature_schema": "52-blendshapes-x-mean-std-min-max-median",
+            "agg_features": features,
+        },
     )
     validate_prediction(prediction)
 

@@ -15,6 +15,13 @@ class BinaryApiTests(unittest.TestCase):
         binary_api.load_models()
         cls.zero_features = {name: 0.0 for name in binary_api.FEATURE_ORDER}
 
+    def request(self, features: dict[str, float]) -> binary_api.PredictRequest:
+        return binary_api.PredictRequest(
+            model_version=binary_api.MODEL_VERSION,
+            feature_schema=binary_api.FEATURE_SCHEMA,
+            agg_features=features,
+        )
+
     def test_model_resources_and_health(self) -> None:
         health = binary_api.health()
         self.assertEqual(health["status"], "ok")
@@ -73,9 +80,7 @@ class BinaryApiTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_prediction_contract_is_strictly_binary(self) -> None:
-        response = binary_api.predict(
-            binary_api.PredictRequest(agg_features=self.zero_features)
-        )
+        response = binary_api.predict(self.request(self.zero_features))
         self.assertEqual(response["model_version"], binary_api.MODEL_VERSION)
         self.assertEqual(response["feature_schema"], binary_api.FEATURE_SCHEMA)
         for label in binary_api.LABEL_COLS:
@@ -107,9 +112,29 @@ class BinaryApiTests(unittest.TestCase):
 
     def test_missing_features_are_rejected(self) -> None:
         with self.assertRaises(HTTPException) as raised:
-            binary_api.predict(binary_api.PredictRequest(agg_features={}))
+            binary_api.predict(self.request({}))
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("Missing 260 features", raised.exception.detail)
+
+    def test_mismatched_client_contract_is_rejected(self) -> None:
+        mismatches = (
+            ("xgb-binary-v1", binary_api.FEATURE_SCHEMA),
+            (binary_api.MODEL_VERSION, "364-feature-schema"),
+        )
+        for model_version, feature_schema in mismatches:
+            with self.subTest(
+                model_version=model_version,
+                feature_schema=feature_schema,
+            ):
+                with self.assertRaises(HTTPException) as raised:
+                    binary_api.predict(
+                        binary_api.PredictRequest(
+                            model_version=model_version,
+                            feature_schema=feature_schema,
+                            agg_features=self.zero_features,
+                        )
+                    )
+                self.assertEqual(raised.exception.status_code, 409)
 
     def test_browser_and_compatibility_routes_are_registered(self) -> None:
         post_paths = {
