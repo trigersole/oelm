@@ -59,6 +59,8 @@ class FrontendBinaryContractTests(unittest.TestCase):
             "const RELIABILITY_DB_NAME = 'oelm-reliability';",
             "window.addEventListener('online'",
             "table: 'prediction_delivery_events'",
+            "outbox_id: `pause-aoi:${metric.session_id}:${metric.pause_and_reflect_number}`",
+            "kind: 'pause_aoi'",
             "['participant_login', 'list_cohorts', 'overview'].includes(action)",
         ]
         for fragment in required_fragments:

@@ -967,32 +967,18 @@ async function insertPrediction(
   });
 }
 
-async function savePauseReflectionAOI(metric) {
+async function queuePauseReflectionAOI(metric) {
   if (!metric?.session_id || !metric?.pause_and_reflect_number) return;
-  await sbRequest(
-    PAUSE_REFLECTION_AOI_TABLE,
-    'POST',
-    metric,
-    { on_conflict: 'session_id,pause_and_reflect_number' },
-    { prefer: 'resolution=merge-duplicates' },
-  );
-}
-
-async function savePauseReflectionAOIWithRetry(metric, maxAttempts = 3) {
-  let lastError = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await savePauseReflectionAOI(metric);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (isSessionLockedError(error)) break;
-      if (attempt < maxAttempts) {
-        await new Promise(resolve => window.setTimeout(resolve, 400 * (2 ** (attempt - 1))));
-      }
-    }
-  }
-  throw lastError;
+  await queueReliabilityItem({
+    outbox_id: `pause-aoi:${metric.session_id}:${metric.pause_and_reflect_number}`,
+    kind: 'pause_aoi',
+    table: PAUSE_REFLECTION_AOI_TABLE,
+    params: { on_conflict: 'session_id,pause_and_reflect_number' },
+    prefer: 'resolution=merge-duplicates',
+    attempts: 0,
+    next_attempt_at: 0,
+    payload: metric,
+  });
 }
 
 // -- Save manual override to Supabase ---------------------------
@@ -2757,9 +2743,11 @@ function App() {
       total_gaze_frames: tracker.totalFrames,
       ended_by: endedBy,
     };
-    savePauseReflectionAOIWithRetry(metric).catch(error => {
-      if (isSessionLockedError(error)) return;
-      setLastError('[Supabase] save Pause and Reflect AOI: ' + String(error));
+    // Persist through the same durable browser outbox as predictions. A
+    // five-second network timeout is retried in the background and never
+    // interrupts or alarms the participant's reflection flow.
+    queuePauseReflectionAOI(metric).catch(error => {
+      console.warn('[Reliability] Could not queue Pause and Reflect AOI:', error);
     });
     return metric;
   }, []);
